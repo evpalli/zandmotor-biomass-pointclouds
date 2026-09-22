@@ -1,9 +1,24 @@
 from pathlib import Path
 import numpy as np
 import laspy
-from scipy.spatial import cKDTree
+from scipy.spatial import cKDTree, ConvexHull
 import CSF
+import scipy.interpolate
 
+'''
+Identify type of vegetation exists on Zandmotor, focus on the specific geometry to 
+narrow down specific vegetation type
+Most vegetation type: sand dunes, european marram grass. types of methods
+    - above-ground biomass (AGB)
+
+Do we want individual tree crown approach (ITC) or area-based
+1. Delineate individual tree crowns using watershed segmentation
+2. Calc. predictory variables for all individual trees
+    - height (highest point of tree), crown (horizontal space tree top cover), crown volume, shape/tecture (pointy, flat, dense, sparse)
+3. Training data collection
+4. RF rgeression model to estimate biomass
+link: https://www.neonscience.org/resources/learning-hub/tutorials/calc-biomass-py
+'''
 
 def run_csf_ground_filter(coords, resolution=0.6, rigidness=2, threshold=0.12):
     """Ground separation via Cloth Simulation Filtering (CSF)."""
@@ -49,6 +64,85 @@ def compute_geometric_features(coords, candidate_idx, radius=0.20, min_neighbors
 
     return planarity, linearity, sphericity
 
+def predictotry_variables(coords, veg_idx, ground_idx):
+    '''
+    returns:
+    - tree height 
+    - crown diameter and density
+        ConvexHull calculation. xy min-max addition and division with 2 is not applied
+        as zandmotor vegetation seem to have sparse, not very evenly spread PC?
+    - shape/texture (pointy, flat, dense, sparse) 
+        compute_geometric_features -> handles this?
+    - diameter at breast height
+    - crown volume
+
+    - CHM
+    ? difficult to obtain tho for the formulas
+    '''
+    # 1. vegetation height
+    veg_pts = coords[veg_idx]
+    ground_pts = coords[ground_idx]
+
+    # assess if most vegetation on zandmotor has flat DTM or bumpy DTM
+    # if bumpy DTM take average, if flat maybe minimum is better?
+    local_ground_z = ground_pts[:, 2].mean() # Average ground elevation under/near the tree
+    tree_height = veg_pts[:, 2].max() - local_ground_z
+
+    # 2. Crown Diameter (Spread across x & y dimensions) and density
+    veg_xy = veg_pts[:, :2]
+    convexhull = ConvexHull(veg_xy)
+    convexhull_area = convexhull.volume
+    crown_diameter = 2 * np.sqrt(convexhull_area / np.pi)
+    
+    total_points = len(veg_pts)
+    crown_density = total_points / convexhull_area
+
+    # 4. Crown volume (2d->3d convex hull?)
+    veg_xyz = veg_pts[:, :3]
+    convexhull_3d = ConvexHull(veg_xyz)
+    convexhull_volume = convexhull_3d.volume
+
+def CHM(coords, veg_idx, grid_resolution=0.1):
+
+    # 1. Classify ground/non-ground points
+    ground_idx, non_ground_idx = run_csf_ground_filter(coords)
+
+    ground_pts = coords[ground_idx]
+    veg_pts = coords[veg_idx]
+
+    # 2. Grid extent
+    x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
+    y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
+
+    grid_x, grid_y = np.mgrid[
+        x_min:x_max:grid_resolution,
+        y_min:y_max:grid_resolution
+    ]
+
+    # 3. Interpolate ground points to create DTM
+    dtm = scipy.interpolate.griddata(
+        ground_pts[:, :2],
+        ground_pts[:, 2],
+        (grid_x, grid_y),nmethod='linear') 
+
+    # 4. Interpolate vegetation points to create DSM
+    dsm = scipy.interpolate.griddata(
+        veg_pts[:, :2],
+        veg_pts[:, 2],
+        (grid_x, grid_y), method='linear')
+
+    # 5. Fill missing values
+    dtm = np.nan_to_num(dtm,nan=np.nanmin(ground_pts[:, 2]))
+
+    dsm = np.nan_to_num(dsm,nan=dtm)
+
+    # 6. Calculate CHM
+    chm = dsm - dtm
+
+    # Remove negative values
+    chm[chm < 0] = 0
+
+    return chm, grid_x, grid_y
 
 def main(input_laz: str, output_laz: str):
     print(f"Loading point cloud: {input_laz}")
