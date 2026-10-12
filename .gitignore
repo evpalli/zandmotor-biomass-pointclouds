@@ -4,3 +4,4 @@ __pycache__/
 *.laz
 *.las
 data/
+data_drone/

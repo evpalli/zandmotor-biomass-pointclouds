@@ -6,22 +6,6 @@ import CSF
 import gc
 import scipy.interpolate
 
-# need pip install CSF
-'''
-Identify type of vegetation exists on Zandmotor, focus on the specific geometry to 
-narrow down specific vegetation type
-Most vegetation type: sand dunes, european marram grass. types of methods
-    - above-ground biomass (AGB)
-
-Do we want individual tree crown approach (ITC) or area-based
-1. Delineate individual tree crowns using watershed segmentation
-2. Calc. predictory variables for all individual trees
-    - height (highest point of tree), crown (horizontal space tree top cover), crown volume, shape/tecture (pointy, flat, dense, sparse)
-3. Training data collection
-4. RF rgeression model to estimate biomass
-link: https://www.neonscience.org/resources/learning-hub/tutorials/calc-biomass-py
-'''
-
 def run_csf_ground_filter(coords, resolution=0.6, rigidness=2, threshold=0.12):
     """Ground separation via Cloth Simulation Filtering (CSF)."""
     csf = CSF.CSF()
@@ -128,6 +112,15 @@ def predictory_variables(coords, veg_idx, ground_idx, radius=0.5, min_neighbors=
                     pass
 
     return tree_height, crown_diameter, crown_density, convexhull_volume
+
+def individual_tree_segmentation(input_laz, output_laz, crown_diameter, crown_positions): # https://www.mdpi.com/1424-8220/21/18/6007
+    '''
+    1. Normalise point cloud. We do not want to perform outlier filtering because we do not want to consider shrubs to be considered noise. 
+        The dataset already only concise of 
+    2. 
+    '''
+    # 1. Normalise point cloud
+
 
 def CHM(coords, veg_idx, ground_idx, grid_resolution=0.25):
     ground_pts = coords[ground_idx]
@@ -258,6 +251,19 @@ def main(input_laz: str, output_laz: str):
 
 
 if __name__ == "__main__":
-    input_file = "/Users/belinaileen/Desktop/zandmotor-biomass-pointclouds/20230927_72220_72420_451650_451850.laz"
-    output_file = "/Users/belinaileen/Desktop/zandmotor-biomass-pointclouds/out.laz"
+    input_file = "data/20261007_north-F001-S001_RD.laz"
+    output_file = "/Users/belinaileen/Desktop/2026_001_out.laz"
     main(input_file, output_file)
+
+'''
+Identify type of vegetation exists on Zandmotor, focus on the specific geometry to 
+narrow down specific vegetation type
+
+Main 2 approaches: Area-based Allocation (ABA) or Individual tree Detection for Biomass Estimation
+1. ABA
+2. ITD
+
+-> next step: rationale between the different vegetation/forest type suitability which which approach ABA/ITD
+https://www.tandfonline.com/doi/pdf/10.1080/17538947.2026.2723552
+https://www.sciencedirect.com/science/article/pii/S1470160X25005400
+'''
