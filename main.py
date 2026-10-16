@@ -4,7 +4,49 @@ import laspy
 from scipy.spatial import cKDTree, ConvexHull
 import CSF
 import gc
-import scipy.interpolate
+import pandas as pd
+from scipy.interpolate import griddata
+from scipy.spatial.distance import pdist
+
+def initialise_grid_ABA(las):
+
+    # Extract X, Y, and Z coordinates
+    x = las.x
+    y = las.y
+    z = las.z
+
+    points = np.column_stack((x, y))
+    values = z
+
+    # Define the grid resolution
+    resolution = 2.0 
+    x_min, x_max = x.min(), x.max()
+    y_min, y_max = y.min(), y.max()
+
+    grid_x, grid_y = np.mgrid[x_min:x_max:resolution, y_min:y_max:resolution]
+
+    grid_z = griddata(points, values, (grid_x, grid_y), method="linear")
+    
+    return grid_x, grid_y, grid_z, points, values
+    '''
+    auf we want to visualise it
+
+    plt.subplot(221)
+    plt.imshow(func(grid_x, grid_y).T, extent=(0,1,0,1), origin='lower')
+    plt.plot(points[:,0], points[:,1], 'k.', ms=1)
+    plt.title('Original')
+    plt.subplot(222)
+    plt.imshow(grid_z0.T, extent=(0,1,0,1), origin='lower')
+    plt.title('Nearest')
+    plt.subplot(223)
+    plt.imshow(grid_z1.T, extent=(0,1,0,1), origin='lower')
+    plt.title('Linear')
+    plt.subplot(224)
+    plt.imshow(grid_z2.T, extent=(0,1,0,1), origin='lower')
+    plt.title('Cubic')
+    plt.gcf().set_size_inches(6, 6)
+    plt.show()
+    '''
 
 def run_csf_ground_filter(coords, resolution=0.6, rigidness=2, threshold=0.12):
     """Ground separation via Cloth Simulation Filtering (CSF)."""
@@ -23,6 +65,11 @@ def run_csf_ground_filter(coords, resolution=0.6, rigidness=2, threshold=0.12):
 
     return np.array(ground_indices), np.array(non_ground_indices)
 
+def classify_grids(points, values, ground_indices, non_ground_indices, grid_x, grid_y):
+    """Generates independent grids for ground and non-ground points."""
+
+    grid_ground = griddata(points[ground_indices], values[ground_indices], (grid_x, grid_y), method="linear")
+    return grid_ground, grid_non_ground
 
 def compute_geometric_features(coords, candidate_idx, radius=0.20, min_neighbors=8):
     """Refinement computing eigenvalue descriptors (Kucak, 2022)."""
@@ -50,77 +97,24 @@ def compute_geometric_features(coords, candidate_idx, radius=0.20, min_neighbors
 
     return planarity, linearity, sphericity
 
-def predictory_variables(coords, veg_idx, ground_idx, radius=0.5, min_neighbors=8):
-    '''
-    returns:
-    - tree height 
-    - point density
-        ConvexHull calculation. xy min-max addition and division with 2 is not applied
-        as zandmotor vegetation seem to have sparse, not very evenly spread PC?
-    - shape/texture (pointy, flat, dense, sparse) 
-        compute_geometric_features -> handles this?
-    - crown volume
+def predictory_variables(grid_ground, grid_non_ground, non_ground_coords):
+    """
+    - Tree height (via Canopy Height Model difference)
+    - Crown diameter (via max pairwise distance on convex hull vertices)
+    - Crown density (via 2D histogram of raw non-ground points)
+    - ConvexHull of non-ground point cloud
+    """
+    # Canopy Height Model (CHM) difference
+    chm = grid_non_ground - grid_ground
+    tree_height = np.nanmax(chm)
 
-    - CHM
-    ? difficult to obtain tho for the formulas
-    '''
-    veg_kdtree = cKDTree(coords[veg_idx])
-    ground_kdtree = cKDTree(coords[ground_idx])
+    convexhull = ConvexHull(non_ground_coords)
+    hull_pts = non_ground_coords[hull.vertices]
+    crown_diameter = np.max(pdist(hull_pts, metric='euclidean'))
 
-    veg_pts = coords[veg_idx]
-    ground_pts = coords[ground_idx]
-    n_veg = len(veg_pts)
+    crown_density, _, _ = np.histogram2d(non_ground_coords[:, 0], non_ground_coords[:, 1], bins=10)
 
-    tree_height = np.zeros(n_veg, dtype=np.float32)
-    crown_diameter = np.zeros(n_veg, dtype=np.float32)
-    crown_density = np.zeros(n_veg, dtype=np.float32)
-    convexhull_volume = np.zeros(n_veg, dtype=np.float32)
-
-    for i, pt in enumerate(veg_pts):
-        veg_neighbor_idx = veg_kdtree.query_ball_point(pt, r=radius)
-        
-        if len(veg_neighbor_idx) >= min_neighbors:
-            cluster_veg = veg_pts[veg_neighbor_idx]
-
-            # Local Height relative to nearby ground points
-            ground_neighbor_idx = ground_kdtree.query_ball_point(pt, r=radius * 2.0)
-            if len(ground_neighbor_idx) > 0:
-                local_ground_z = np.mean(ground_pts[ground_neighbor_idx, 2])
-            else:
-                local_ground_z = pt[2] # Fallback to current z if no ground points nearby
-                
-            tree_height[i] = np.max(cluster_veg[:, 2]) - local_ground_z
-
-            # Spread across x & y dimensions
-            cluster_xy = cluster_veg[:, :2]
-            if len(np.unique(cluster_xy, axis=0)) >= 3:
-                try:
-                    hull_2d = ConvexHull(cluster_xy)
-                    convexhull_area = hull_2d.volume  # In 2D, volume represents area
-                    if convexhull_area > 0:
-                        crown_diameter[i] = 2.0 * np.sqrt(convexhull_area / np.pi)
-                        crown_density[i] = len(cluster_veg) / convexhull_area
-                except Exception:
-                    pass  # Coplanar or collinear subset safe-guard
-
-            # Crown Volume
-            if len(np.unique(cluster_veg, axis=0)) >= 4:
-                try:
-                    hull_3d = ConvexHull(cluster_veg)
-                    convexhull_volume[i] = hull_3d.volume
-                except Exception:
-                    pass
-
-    return tree_height, crown_diameter, crown_density, convexhull_volume
-
-def individual_tree_segmentation(input_laz, output_laz, crown_diameter, crown_positions): # https://www.mdpi.com/1424-8220/21/18/6007
-    '''
-    1. Normalise point cloud. We do not want to perform outlier filtering because we do not want to consider shrubs to be considered noise. 
-        The dataset already only concise of 
-    2. 
-    '''
-    # 1. Normalise point cloud
-
+    return chm, tree_height, convexhull, crown_diameter, crown_density
 
 def CHM(coords, veg_idx, ground_idx, grid_resolution=0.25):
     ground_pts = coords[ground_idx]
