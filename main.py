@@ -116,6 +116,7 @@ def predictory_variables(grid_ground, grid_non_ground, non_ground_coords):
 
     return chm, tree_height, convexhull, crown_diameter, crown_density
 
+# chekc later if we want to keep this
 def CHM(coords, veg_idx, ground_idx, grid_resolution=0.25):
     ground_pts = coords[ground_idx]
     veg_pts = coords[veg_idx]
@@ -167,6 +168,7 @@ def CHM(coords, veg_idx, ground_idx, grid_resolution=0.25):
 
     return chm, grid_x, grid_y
 
+# has not been adapted to aba style
 def main(input_laz: str, output_laz: str):
     print(f"Loading point cloud: {input_laz}")
     las = laspy.read(input_laz)
