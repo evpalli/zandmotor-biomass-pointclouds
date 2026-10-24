@@ -88,6 +88,32 @@ def bfs(neighbour_offsets, root, voxel_set, global_visited):
                 queue.append(nn)
     return seen
 
+def compute_geometric_features(coords, candidate_idx, radius=0.20, min_neighbors=8):
+    """Refinement computing eigenvalue descriptors (Kucak, 2022)."""
+    kdtree = cKDTree(coords)
+    candidate_pts = coords[candidate_idx]
+    n_candidates = len(candidate_pts)
+
+    planarity = np.zeros(n_candidates, dtype=np.float32)
+    linearity = np.zeros(n_candidates, dtype=np.float32)
+    sphericity = np.zeros(n_candidates, dtype=np.float32)
+
+    for i, pt in enumerate(candidate_pts):
+        neighbor_indices = kdtree.query_ball_point(pt, r=radius)
+        if len(neighbor_indices) >= min_neighbors:
+            neighbors = coords[neighbor_indices]
+            cov = np.cov(neighbors, rowvar=False)
+
+            eigenvalues = np.linalg.eigvalsh(cov)
+            eigenvalues = np.sort(np.maximum(eigenvalues, 1e-9))[::-1]
+            l1, l2, l3 = eigenvalues[0], eigenvalues[1], eigenvalues[2]
+
+            planarity[i] = (l2 - l3) / l1
+            linearity[i] = (l1 - l2) / l1
+            sphericity[i] = l3 / l1
+
+    return planarity, linearity, sphericity
+    
 def segment_tussocks():
     """
     groups discrete pioneer grass clumps using DBSCAN spatial clustering.
