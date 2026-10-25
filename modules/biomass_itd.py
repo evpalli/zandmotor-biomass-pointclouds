@@ -4,13 +4,12 @@ PURPOSE: Individual Tussock Detection (ITD) and 3D biomass/volume comparison.
 ASSIGNMENT QUESTION: Research Question (Biomass Estimation vs. Dune Slope)
 """
 
-# import numpy as np
-# import pandas as pd
-# from scipy.spatial import cKDTree, ConvexHull
+import numpy as np
+import pandas as pd
+from scipy.spatial import cKDTree, ConvexHull, QhullError
 # from sklearn.cluster import DBSCAN
 import numpy as np
 import alphashape
-from scipy.spatial import ConvexHull
 from collections import deque
 
 def voxel_3d(las, voxel_size=0.5):
@@ -59,15 +58,17 @@ def voxel_3d(las, voxel_size=0.5):
             for v in cluster:
                 components[v] = component_id
             
+            # Occupied voxel volume for this cluster
+            veg_id_volume[component_id] = (len(cluster) * (voxel_size ** 3))
             # Calculate discrete voxel volume for this specific cluster
             cluster_occupied = len(cluster)
             volume_veg = cluster_occupied * (voxel_size ** 3)
             veg_id_volume[component_id] = volume_veg
+    # add point to trace back the points/indexing for volume computations
+    point_cluster_ids = np.array([components[tuple(v)] for v in voxel_indices], dtype=np.int32)
+    total_volume = len(voxel_set) * (voxel_size ** 3)
 
-    n_occupied = len(global_visited)
-    total_volume = n_occupied * (voxel_size ** 3)
-
-    return voxel_set, voxel_indices, components, component_id, veg_id_volume, total_volume
+    return voxel_set, voxel_indices, components, component_id, veg_id_volume, total_volume, points, point_cluster_ids
 
 def bfs(neighbour_offsets, root, voxel_set, global_visited):
     queue = deque([root])
@@ -124,26 +125,53 @@ def segment_tussocks():
 
 def convex_hull_vol(cluster_coords):
     """Method 1: Solid bounding polyhedral volume via 3D Convex Hull."""
-    convex_hull = ConvexHull(cluster_coords)
-    convex_hull_vol = convex_hull.volume
-    return convex_hull_vol
-
-def voxel_vol(cluster_voxels, voxel_size=0.5):
-    """
-    Method 2: Discrete 3D voxel grid volume (V = N_occupied * r^3).
-    Captures internal void space and porosity of Ammophila arenaria.
-    """
-    voxel_vol = len(cluster_voxels) * (voxel_size ** 3)
-    return voxel_vol
+    # at least 4 to avoid QHull raise error
+    if len(cluster_coords) < 4:
+        return 0.0
+    hull = ConvexHull(cluster_coords)
+    convexhull_vol = float(hull.volume)
+    return convexhull_vol
     
 def alpha_shape_vol(cluster_coords, alpha=0.5):
     """
-    Method 3: Concave boundary mesh volume (Jang & Kang, 2024).
-    Uses alphashape library
+    Calculate 3D alpha-shape volume.
+    Return NaN when a valid 3D volume cannot be calculated.
     """
-    alphashape = alphashape.alphashape(cluster_coords, alpha)
-    alphashape_volume = alphashape.volume
-    return alphashape_volume
+
+    cluster_coords = np.asarray(cluster_coords, dtype=float)
+
+    # Remove invalid and duplicate points
+    cluster_coords = cluster_coords[np.all(np.isfinite(cluster_coords), axis=1)]
+    cluster_coords = np.unique(cluster_coords, axis=0)
+
+    # A 3D shape needs at least four unique points
+    if len(cluster_coords) < 4:
+        return np.nan
+
+    # Check whether the points span three dimensions
+    centered = cluster_coords - cluster_coords.mean(axis=0)
+    if np.linalg.matrix_rank(centered) < 3:
+        return np.nan
+
+    try:
+        shape = alphashape.alphashape(cluster_coords, alpha)
+
+        # Check that a valid 3D mesh was generated
+        if not hasattr(shape, "is_watertight"):
+            return np.nan
+
+        if not shape.is_watertight:
+            return np.nan
+
+        volume = float(shape.volume)
+
+        if not np.isfinite(volume) or volume < 0:
+            return np.nan
+
+        return volume
+
+    except (QhullError, ValueError, IndexError, ZeroDivisionError):
+        return np.nan
 
 def extract_tussock_dataframe():
     """

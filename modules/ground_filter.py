@@ -10,7 +10,6 @@ import laspy
 from scipy.spatial import cKDTree
 import CSF
 
-
 def csf(coords: np.ndarray, resolution: float = 0.6, rigidness: int = 2, threshold: float = 0.12):
     """
     Stage 1: CSF Macro-Ground Filtering (Zhang et al., 2016).

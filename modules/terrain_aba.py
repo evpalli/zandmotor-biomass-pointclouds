@@ -23,85 +23,116 @@ def sample_raster(raster, bounds, x, y):
     out[ok] = raster[row[ok], col[ok]]
     return out
 
+def rasters(
+    coords: np.ndarray,
+    ground_idx: np.ndarray,
+    veg_idx: np.ndarray,
+    grid_res: float = 0.10,
+):
+    """
+    Generate DTM, DSM, CHM and slope rasters using vectorised binning.
 
-def rasters(coords: np.ndarray, ground_idx: np.ndarray, veg_idx: np.ndarray, grid_res: float = 0.10):
+    DTM: minimum ground elevation in each cell.
+    DSM: maximum vegetation elevation in each cell.
+    CHM: DSM - DTM, clipped at zero.
+    Slope: terrain slope in degrees.
     """
-    Generates 2.5D DTM, DSM, and CHM rasters via direct vectorized binning.
-    Returns: dtm, chm, slope_deg, raster_bounds
-    """
-    x_min, x_max = coords[:, 0].min(), coords[:, 0].max() # all row, 1st column (x) - left to right
-    y_min, y_max = coords[:, 1].min(), coords[:, 1].max() # all row, 2nd column (y)
+
+    # 1. Define raster bounds
+    x_min = coords[:, 0].min()
+    x_max = coords[:, 0].max()
+    y_min = coords[:, 1].min()
+    y_max = coords[:, 1].max()
 
     ncols = int(np.ceil((x_max - x_min) / grid_res)) + 1
     nrows = int(np.ceil((y_max - y_min) / grid_res)) + 1
 
-    # dictionary storing where raster grid information
-    raster_bounds = {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max,
-                    "grid_res": grid_res, "nrows": nrows, "ncols": ncols,}
+    bounds = {
+        "x_min": x_min,
+        "x_max": x_max,
+        "y_min": y_min,
+        "y_max": y_max,
+        "grid_res": grid_res,
+        "nrows": nrows,
+        "ncols": ncols,
+    }
 
-    # DTM: lowest ground elevation per grid cell
+    print(
+        f"Raster grid: {nrows:,} rows x {ncols:,} columns "
+        f"({nrows * ncols:,} cells)",
+        flush=True,
+    )
+
+    # 2. Convert coordinates to raster indices
+    # Rows are measured from the northern edge.
+    def get_flat_indices(points):
+        cols = np.floor((points[:, 0] - x_min) / grid_res).astype(np.int64)
+        rows = np.floor((y_max - points[:, 1]) / grid_res).astype(np.int64)
+
+        # Clamp indices to valid raster bounds.
+        cols = np.clip(cols, 0, ncols - 1)
+        rows = np.clip(rows, 0, nrows - 1)
+
+        return rows * ncols + cols
+
+    n_cells = nrows * ncols
+
+    # 3. DTM: minimum ground elevation per cell
     ground_pts = coords[ground_idx]
 
-    dtm = np.full((nrows, ncols), np.nan, dtype=np.float32) # initialise empty grid
+    dtm_flat = np.full(n_cells, np.inf, dtype=np.float32)
 
-    for r in range(nrows):
-        for c in range(ncols):
-            x_min_cell = raster_bounds["x_min"] + c * grid_res
-            x_max_cell = x_min_cell + grid_res
+    if len(ground_pts) > 0:
+        ground_cells = get_flat_indices(ground_pts)
 
-            y_max_cell = raster_bounds["y_max"] - r * grid_res
-            y_min_cell = y_max_cell - grid_res
+        np.minimum.at(
+            dtm_flat,
+            ground_cells,
+            ground_pts[:, 2].astype(np.float32))
 
-            inside = ((ground_pts[:, 0] >= x_min_cell) & # find ground points inside cell
-                    (ground_pts[:, 0] < x_max_cell) &
-                    (ground_pts[:, 1] >= y_min_cell) &
-                    (ground_pts[:, 1] < y_max_cell))
+    dtm_flat[~np.isfinite(dtm_flat)] = np.nan
+    dtm = dtm_flat.reshape(nrows, ncols)
 
-            cell_ground_pts = ground_pts[inside]
-
-            # Assign the lowest ground elevation to this cell
-            if len(cell_ground_pts) > 0:
-                dtm[r, c] = np.min(cell_ground_pts[:, 2])
-
-    dtm = dtm[nearest[0], nearest[1]]
-    # DSM: maximum canopy elevation per cell
+    # 4. DSM: maximum vegetation elevation per cell
     veg_pts = coords[veg_idx]
-    dsm = np.full((nrows, ncols), np.nan, dtype=np.float32) # initialise empty grid dsm
 
-    for r in range(nrows):
-        for c in range(ncols):
-            x_min_cell = raster_bounds["x_min"] + c * grid_res
-            x_max_cell = x_min_cell + grid_res
+    dsm_flat = np.full(n_cells, -np.inf, dtype=np.float32)
 
-            y_max_cell = raster_bounds["y_max"] - r * grid_res
-            y_min_cell = y_max_cell - grid_res
+    if len(veg_pts) > 0:
+        veg_cells = get_flat_indices(veg_pts)
 
-            inside_veg = ((veg_pts[:, 0] >= x_min_cell) & # find ground points inside cell
-                    (veg_pts[:, 0] < x_max_cell) &
-                    (veg_pts[:, 1] >= y_min_cell) &
-                    (veg_pts[:, 1] < y_max_cell))
+        np.maximum.at(
+            dsm_flat,
+            veg_cells,
+            veg_pts[:, 2].astype(np.float32),
+        )
 
-            cell_veg_pts = veg_pts[inside_veg]
+    dsm_flat[~np.isfinite(dsm_flat)] = np.nan
+    dsm = dsm_flat.reshape(nrows, ncols)
 
-            # Assign the lowest ground elevation to this cell
-            if len(cell_veg_pts) > 0:
-                dsm[r, c] = np.max(cell_veg_pts[:, 2])
-    # make sure of empty DTM and DSM. if empty DTM -> nearest cell, if empty DSM -> DSM = DTM (e.g. no vegetation)
-    empty = np.isnan(dtm)
-    if empty.any():
-        nearest = distance_transform_edt(empty,return_distances=False, return_indices=True)
-    empty_dsm = np.isnan(dsm)
+    # 5. Fill missing DTM cells using nearest valid DTM cells
+    empty_dtm = ~np.isfinite(dtm)
+
+    if empty_dtm.all():
+        raise ValueError("Cannot build DTM: no valid ground elevations were found.")
+
+    if empty_dtm.any():
+        nearest = distance_transform_edt(empty_dtm,return_distances=False,return_indices=True)
+
+        dtm[empty_dtm] = dtm[nearest[0][empty_dtm], nearest[1][empty_dtm]]
+
+    # 6. Where vegetation is absent, set DSM equal to DTM
+    empty_dsm = ~np.isfinite(dsm)
     dsm[empty_dsm] = dtm[empty_dsm]
-    dtm = dtm[nearest[0], nearest[1]]
 
-    # CHM: Canopy Height Model
+    # 7. CHM
     chm = np.maximum(dsm - dtm, 0.0)
 
-    # dune slope in degrees via horizontal elevation gradients (grad Z)
+    # 8. Slope in degrees
     dy, dx = np.gradient(dtm, grid_res)
-    slope_deg = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
 
-    return dtm, chm, slope_deg, raster_bounds
+    slope_deg = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2))).astype(np.float32)
+    return dtm, chm, slope_deg, bounds
 
 
 def compute_epoch_differences(dtm_t1: np.ndarray, dtm_t2: np.ndarray,
