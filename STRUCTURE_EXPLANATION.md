@@ -25,3 +25,21 @@ biomass/
 ├── STRUCTURE_EXPLANATION.md   # This documentation
 ├── requirements.txt           # Virtual environment libraries
 └── .gitignore                 # Excludes heavy LiDAR binaries from GitHub
+
+```
+#### Pipeline Summary
+
+1. **Ground filtering:** Separate ground and vegetation points using geometric features.
+2. **Terrain modelling:** Generate DTM, CHM, and slope rasters.
+3. **Terrain attribute calculation:** Calculate height above ground and point-level slope.
+4. **Spectral analysis:** Calculate VARI from RGB values.
+5. **Voxelisation:** Convert vegetation points into 3D voxels.
+6. **Individual vegetation detection:** Identify connected voxel components and assign cluster IDs.
+7. **Geometric feature extraction:** Calculate planarity, linearity, and sphericity.
+8. **Cluster aggregation:** Calculate cluster-level spatial and attribute statistics.
+9. **Volume estimation:** Estimate vegetation volume using voxels, convex hulls, and alpha shapes.
+10. **Species classification:** Assign pioneer species labels using height, linearity, and VARI.
+11. **Attribute propagation:** Transfer cluster attributes back to individual vegetation points.
+12. **Export:** Save the enriched point cloud and cluster-level CSV table.
+
+**Overall objective:** Transform a raw dune LiDAR point cloud into an enriched 3D vegetation dataset with individual vegetation clusters, terrain-relative height, geometric and spectral characteristics, estimated volumes, and pioneer species classifications.
