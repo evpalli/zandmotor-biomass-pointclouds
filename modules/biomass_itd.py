@@ -15,7 +15,7 @@ from collections import deque
 def voxel_3d(las, voxel_size=0.5):
     """
     Initializes 3D voxel grid, separates occupied vs empty space,
-    and runs 16-connectivity BFS to extract connected components.
+    and runs 18-connectivity BFS to extract connected components.
     """
     x = las.x
     y = las.y
@@ -30,7 +30,7 @@ def voxel_3d(las, voxel_size=0.5):
     unique_voxels = np.unique(voxel_indices, axis=0)
     voxel_set = {tuple(v) for v in unique_voxels}
     
-    # 16-connectivity (6 face neighbors + 10 edge neighbors)
+    # 18-connectivity (6 face neighbors + 10 edge neighbors)
     face_neighbors = [
         (1, 0, 0), (-1, 0, 0), 
         (0, 1, 0), (0, -1, 0), 
@@ -39,7 +39,7 @@ def voxel_3d(las, voxel_size=0.5):
         (1, 1, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0),
         (1, 0, 1), (1, 0, -1), (-1, 0, 1), (-1, 0, -1),
         (0, 1, 1), (0, 1, -1), (0, -1, 1), (0, -1, -1)]
-    connectivity_16 = face_neighbors + edge_neighbors 
+    connectivity_18 = face_neighbors + edge_neighbors 
 
     # Global Connected Components Tracking
     global_visited = set()
@@ -51,7 +51,7 @@ def voxel_3d(las, voxel_size=0.5):
         if voxel not in global_visited:
             component_id += 1
             # Run BFS starting from this unvisited seed voxel
-            cluster = bfs(connectivity_16, voxel, voxel_set, global_visited)
+            cluster = bfs(connectivity_18, voxel, voxel_set, global_visited)
             
             # Map all voxels found in the component cluster to their ID
             for v in cluster:
