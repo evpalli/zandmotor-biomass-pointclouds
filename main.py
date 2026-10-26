@@ -120,11 +120,6 @@ def main(input_las_path: str, output_las_path: str, grid_res: float = 0.10,
     veg_cid = uniq_ids[inv]
 
     # 5. planarity, sphericity, and linearity initialisation using veg. pts
-    planarity, linearity, sphericity = compute_geometric_features(veg_coords, np.arange(len(veg_coords)), radius=0.20, min_neighbors=5)
-    valid = (planarity + linearity + sphericity) > 0.5
-    planarity = np.where(valid, planarity, np.nan)
-    linearity = np.where(valid, linearity, np.nan)
-    sphericity = np.where(valid, sphericity, np.nan)
 
     # 6a. initialise dataframa with columns
     pts = pd.DataFrame({
@@ -132,20 +127,31 @@ def main(input_las_path: str, output_las_path: str, grid_res: float = 0.10,
         "x": veg_coords[:, 0], "y": veg_coords[:, 1], "z": veg_coords[:, 2],
         "height_above_ground": height_above_ground[final_veg_idx], "ground_z": ground_z[final_veg_idx],
         "slope_deg": slope_pt[final_veg_idx],
-        "planarity": planarity, "linearity": linearity, "sphericity": sphericity,
         "vari": vari[final_veg_idx] if vari is not None else np.nan})
-    # 6b. initialise table of points grouped by cluster 
+
+    # Calculate geometric features for each entire vegetation cluster
+    cluster_features = []
+    for cluster_id, group in pts.groupby("cluster_id"):
+        coords = group[["x", "y", "z"]].to_numpy()
+        planarity, linearity, sphericity = (compute_geometric_features(cluster_coords))
+        cluster_features.append({"cluster_id": cluster_id,
+                                "planarity": planarity,
+                                "linearity": linearity,
+                                "sphericity": sphericity})
+
+    cluster_features = pd.DataFrame(cluster_features)
+    # 6b. initialise table of points grouped by vegetation cluster 
     # (cluster represent group of voxel representing vegetation)
     table = pts.groupby("cluster_id").agg(
         point_count=("x", "size"),
         centroid_x=("x", "mean"), centroid_y=("y", "mean"), centroid_z=("z", "mean"),
         ground_z=("ground_z", "mean"),
         height_above_ground_max=("height_above_ground", "max"), height_above_ground_mean=("height_above_ground", "mean"),
-        slope_deg_mean=("slope_deg", "mean"), slope_deg_median=("slope_deg", "median"), # i don't know to use median/mean here 
-        planarity_median=("planarity", "median"),
-        linearity_median=("linearity", "median"),
-        sphericity_median=("sphericity", "median"),
+        slope_deg_mean=("slope_deg", "mean"),slope_deg_median=("slope_deg", "median"),
         vari_median=("vari", "median"))
+
+    # Add cluster-level geometric features
+    table = table.join(cluster_features.set_index("cluster_id"))
 
     # 7. Volumes: voxel (Method 1), convex hull (Method 2), alpha shape (Method 3)
     '''
@@ -156,17 +162,23 @@ def main(input_las_path: str, output_las_path: str, grid_res: float = 0.10,
     for v, cid in components.items():
         voxels_by_cluster[cid].append(v)
     # table["volume_voxel_m3"] = [voxel_vol(voxels_by_cluster[c], voxel_size) for c in table.index]
-    table["volume_voxel_m3"] = veg_id_volume
+    # table["volume_voxel_m3"] = veg_id_volume
+    table["volume_voxel_m3"] = pd.Series(veg_id_volume).reindex(table.index) # ensures matching volume to its corresponding cluster ID.
     table["volume_convex_hull_m3"] = [convex_hull_vol(points[point_cluster_ids == c])for c in table.index]
     table["volume_alpha_shape_m3"] = [alpha_shape_vol(points[point_cluster_ids == c]) for c in table.index]
 
     # 8. Spectral typing: Classify pioneer species
     labels = []
     for _, r in table.iterrows():
-        if not np.isnan([r.height_max_m, r.linearity_median, r.vari_median]).any():
-            labels.append(classify_pioneer_species(r.height_max_m, r.linearity_median, r.vari_median))
+        height = r["height_above_ground_max"]
+        linearity = r["linearity"]
+        vari = r["vari_median"]
+
+        if np.isfinite([height, linearity, vari]).all():
+            labels.append(classify_pioneer_species(height, linearity, vari))
         else:
             labels.append("Unclassified (missing RGB or too few points)")
+
     table["species"] = labels
     table["species_code"] = table["species"].map(SPECIES_CODES).astype(np.uint8)
     for name, count in table["species"].value_counts().items():
@@ -178,9 +190,9 @@ def main(input_las_path: str, output_las_path: str, grid_res: float = 0.10,
 
     tussock_id[final_veg_idx] = veg_cid
     species_class[final_veg_idx] = spread("species_code")
-    veg_planarity[final_veg_idx] = planarity
-    veg_linearity[final_veg_idx] = linearity
-    veg_sphericity[final_veg_idx] = sphericity
+    veg_planarity[final_veg_idx] = spread("planarity")
+    veg_linearity[final_veg_idx] = spread("linearity")
+    veg_sphericity[final_veg_idx] = spread("sphericity")
     vol_voxel[final_veg_idx] = spread("volume_voxel_m3")
     vol_hull[final_veg_idx] = spread("volume_convex_hull_m3")
     vol_alpha[final_veg_idx] = spread("volume_alpha_shape_m3")

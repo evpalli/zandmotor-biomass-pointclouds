@@ -46,7 +46,6 @@ def voxel_3d(las, voxel_size=0.5):
     components = {}
     component_id = 0
     veg_id_volume = {}
-    cluster_points_dict = {}
 
     for voxel in voxel_set:
         if voxel not in global_visited:
@@ -89,29 +88,26 @@ def bfs(neighbour_offsets, root, voxel_set, global_visited):
                 queue.append(nn)
     return seen
 
-def compute_geometric_features(coords, candidate_idx, radius=0.20, min_neighbors=8):
+def compute_geometric_features(cluster_coords):
     """Refinement computing eigenvalue descriptors (Kucak, 2022)."""
-    kdtree = cKDTree(coords)
-    candidate_pts = coords[candidate_idx]
-    n_candidates = len(candidate_pts)
+    coords = np.asarray(cluster_coords, dtype=float)
 
-    planarity = np.zeros(n_candidates, dtype=np.float32)
-    linearity = np.zeros(n_candidates, dtype=np.float32)
-    sphericity = np.zeros(n_candidates, dtype=np.float32)
+    # Require at least 3 points
+    if len(coords) < 3:
+        return np.nan, np.nan, np.nan
 
-    for i, pt in enumerate(candidate_pts):
-        neighbor_indices = kdtree.query_ball_point(pt, r=radius)
-        if len(neighbor_indices) >= min_neighbors:
-            neighbors = coords[neighbor_indices]
-            cov = np.cov(neighbors, rowvar=False)
+    # Calculate covariance matrix using all points in the cluster
+    cov = np.cov(coords, rowvar=False)
+    eigenvalues = np.linalg.eigvalsh(cov) # Calculate eigenvalues
+    eigenvalues = np.sort(eigenvalues)[::-1] # Sort from largest to smallest
+    l1, l2, l3 = eigenvalues
+    if l1 <= 0: # Avoid division by zero
+        return np.nan, np.nan, np.nan
 
-            eigenvalues = np.linalg.eigvalsh(cov)
-            eigenvalues = np.sort(np.maximum(eigenvalues, 1e-9))[::-1]
-            l1, l2, l3 = eigenvalues[0], eigenvalues[1], eigenvalues[2]
-
-            planarity[i] = (l2 - l3) / l1
-            linearity[i] = (l1 - l2) / l1
-            sphericity[i] = l3 / l1
+    # Calculate geometric features
+    planarity = (l2 - l3) / l1
+    linearity = (l1 - l2) / l1
+    sphericity = l3 / l1
 
     return planarity, linearity, sphericity
     
@@ -146,32 +142,32 @@ def alpha_shape_vol(cluster_coords, alpha=0.5):
 
     # A 3D shape needs at least four unique points
     if len(cluster_coords) < 4:
-        return np.nan
+        return 1001
 
     # Check whether the points span three dimensions
     centered = cluster_coords - cluster_coords.mean(axis=0)
     if np.linalg.matrix_rank(centered) < 3:
-        return np.nan
+        return 1002
 
     try:
         shape = alphashape.alphashape(cluster_coords, alpha)
 
         # Check that a valid 3D mesh was generated
         if not hasattr(shape, "is_watertight"):
-            return np.nan
+            return 1003
 
         if not shape.is_watertight:
-            return np.nan
+            return 1003
 
         volume = float(shape.volume)
 
         if not np.isfinite(volume) or volume < 0:
-            return np.nan
+            return 1004
 
         return volume
 
     except (QhullError, ValueError, IndexError, ZeroDivisionError):
-        return np.nan
+        return 1005
 
 def extract_tussock_dataframe():
     """
