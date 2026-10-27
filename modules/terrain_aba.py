@@ -1,48 +1,63 @@
 """
 MODULE: terrain_aba.py
 PURPOSE: Area-Based Approach (ABA) 2.5D raster generation and multi-epoch geomorphology.
-ASSIGNMENT QUESTIONS: A1 (Pulse Density Analysis), A3 (Spatio-Temporal Dynamics), and RQ (Dune Slope)
+ASSIGNMENT QUESTIONS: A1, A3, C2, C3
 """
 
+from pathlib import Path
+import laspy
 import numpy as np
+import pandas as pd
 from scipy.ndimage import distance_transform_edt
 
-def cell_indexes(x, y, bounds):
-    """points -> Grida: assign points to grid"""
-    res = bounds["grid_res"]
-    col = np.floor((x - bounds["x_min"]) / res).astype(np.int64)
-    row = np.floor((y - bounds["y_min"]) / res).astype(np.int64)
-    return row, col
 
+def characteristics(file_paths: list[str]) -> pd.DataFrame:
+    """Computes point counts, spatial bounds, footprint area, and pulse density (Question A1)."""
+    records = []
+    for path_str in file_paths:
+        path = Path(path_str)
+        with laspy.open(path) as f:
+            las = f.read()
 
-def sample_raster(raster, bounds, x, y):
-    """Grid -> points: reads the raster value under every (x, y); NaN if outside the grid."""
-    row, col = cell_indexes(x, y, bounds)
-    ok = (row >= 0) & (row < raster.shape[0]) & (col >= 0) & (col < raster.shape[1])
-    out = np.full(x.shape, np.nan, dtype=np.float32)
-    out[ok] = raster[row[ok], col[ok]]
-    return out
+        total_pts = len(las.points)
+        x_min, x_max = float(las.x.min()), float(las.x.max())
+        y_min, y_max = float(las.y.min()), float(las.y.max())
+        z_min, z_max = float(las.z.min()), float(las.z.max())
+
+        area = (x_max - x_min) * (y_max - y_min)
+        density = total_pts / area if area > 0 else 0.0
+
+        records.append({
+            "Epoch": path.stem.split("_")[0],
+            "File Name": path.name,
+            "Total Points": total_pts,
+            "X Bounds (m)": f"[{x_min:.1f}, {x_max:.1f}]",
+            "Y Bounds (m)": f"[{y_min:.1f}, {y_max:.1f}]",
+            "Z Range (m)": f"[{z_min:.2f}, {z_max:.2f}]",
+            "Area (m²)": round(area, 2),
+            "Pulse Density (pts/m²)": round(density, 2),
+            "Attributes": ", ".join(list(las.point_format.dimension_names)),
+        })
+    return pd.DataFrame(records)
+
 
 def rasters(
     coords: np.ndarray,
     ground_idx: np.ndarray,
     veg_idx: np.ndarray,
     grid_res: float = 0.10,
-):
-    """
-    Generate DTM, DSM, CHM and slope rasters using vectorised binning.
+    bounds_override: dict | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Generates DTM, CHM, and Dune Slope rasters via vectorized NumPy binning.
 
-    DTM: minimum ground elevation in each cell.
-    DSM: maximum vegetation elevation in each cell.
-    CHM: DSM - DTM, clipped at zero.
-    Slope: terrain slope in degrees.
+    Allows bounding box override for multi-epoch co-registration.
     """
-
-    # 1. Define raster bounds
-    x_min = coords[:, 0].min()
-    x_max = coords[:, 0].max()
-    y_min = coords[:, 1].min()
-    y_max = coords[:, 1].max()
+    if bounds_override is not None:
+        x_min, x_max = bounds_override["x_min"], bounds_override["x_max"]
+        y_min, y_max = bounds_override["y_min"], bounds_override["y_max"]
+    else:
+        x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
+        y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
 
     ncols = int(np.ceil((x_max - x_min) / grid_res)) + 1
     nrows = int(np.ceil((y_max - y_min) / grid_res)) + 1
@@ -57,97 +72,75 @@ def rasters(
         "ncols": ncols,
     }
 
-    print(
-        f"Raster grid: {nrows:,} rows x {ncols:,} columns "
-        f"({nrows * ncols:,} cells)",
-        flush=True,
-    )
-
-    # 2. Convert coordinates to raster indices
-    # Rows are measured from the northern edge.
-    def get_flat_indices(points):
-        cols = np.floor((points[:, 0] - x_min) / grid_res).astype(np.int64)
-        rows = np.floor((y_max - points[:, 1]) / grid_res).astype(np.int64)
-
-        # Clamp indices to valid raster bounds.
-        cols = np.clip(cols, 0, ncols - 1)
-        rows = np.clip(rows, 0, nrows - 1)
-
-        return rows * ncols + cols
+    def get_indices(pts):
+        c = np.clip(
+            np.floor((pts[:, 0] - x_min) / grid_res).astype(np.int64),
+            0,
+            ncols - 1,
+        )
+        r = np.clip(
+            np.floor((y_max - pts[:, 1]) / grid_res).astype(np.int64),
+            0,
+            nrows - 1,
+        )
+        return r * ncols + c
 
     n_cells = nrows * ncols
 
-    # 3. DTM: minimum ground elevation per cell
+    # 1. DTM: Minimum ground elevation
     ground_pts = coords[ground_idx]
-
     dtm_flat = np.full(n_cells, np.inf, dtype=np.float32)
-
     if len(ground_pts) > 0:
-        ground_cells = get_flat_indices(ground_pts)
-
         np.minimum.at(
-            dtm_flat,
-            ground_cells,
-            ground_pts[:, 2].astype(np.float32))
-
+            dtm_flat, get_indices(ground_pts), ground_pts[:, 2].astype(np.float32)
+        )
     dtm_flat[~np.isfinite(dtm_flat)] = np.nan
     dtm = dtm_flat.reshape(nrows, ncols)
 
-    # 4. DSM: maximum vegetation elevation per cell
+    # 2. DSM: Maximum vegetation elevation
     veg_pts = coords[veg_idx]
-
     dsm_flat = np.full(n_cells, -np.inf, dtype=np.float32)
-
     if len(veg_pts) > 0:
-        veg_cells = get_flat_indices(veg_pts)
-
         np.maximum.at(
-            dsm_flat,
-            veg_cells,
-            veg_pts[:, 2].astype(np.float32),
+            dsm_flat, get_indices(veg_pts), veg_pts[:, 2].astype(np.float32)
         )
-
     dsm_flat[~np.isfinite(dsm_flat)] = np.nan
     dsm = dsm_flat.reshape(nrows, ncols)
 
-    # 5. Fill missing DTM cells using nearest valid DTM cells
+    # Gap-fill DTM with nearest neighbor
     empty_dtm = ~np.isfinite(dtm)
-
     if empty_dtm.all():
-        raise ValueError("Cannot build DTM: no valid ground elevations were found.")
-
+        raise ValueError("No ground points found inside bounding extent.")
     if empty_dtm.any():
-        nearest = distance_transform_edt(empty_dtm,return_distances=False,return_indices=True)
-
+        nearest = distance_transform_edt(
+            empty_dtm, return_distances=False, return_indices=True
+        )
         dtm[empty_dtm] = dtm[nearest[0][empty_dtm], nearest[1][empty_dtm]]
 
-    # 6. Where vegetation is absent, set DSM equal to DTM
-    empty_dsm = ~np.isfinite(dsm)
-    dsm[empty_dsm] = dtm[empty_dsm]
-
-    # 7. CHM
+    # 3. CHM: DSM - DTM clipped at 0
+    dsm[~np.isfinite(dsm)] = dtm[~np.isfinite(dsm)]
     chm = np.maximum(dsm - dtm, 0.0)
 
-    # 8. Slope in degrees
+    # 4. Dune Slope (degrees) via elevation gradient
     dy, dx = np.gradient(dtm, grid_res)
-
     slope_deg = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2))).astype(np.float32)
+
     return dtm, chm, slope_deg, bounds
 
 
-def compute_epoch_differences(dtm_t1: np.ndarray, dtm_t2: np.ndarray,
-                              chm_t1: np.ndarray, chm_t2: np.ndarray):
-    """
-    Multi-temporal raster change detection (Question A3):
-      - delta_dtm > 0: Aeolian sand accretion / burial around stems
-      - delta_dtm < 0: Wind erosion / dune blowout
-      - delta_chm > 0: Biological vegetation growth / canopy expansion
-      - delta_chm < 0: Canopy burial or seasonal senescence
+def epoch_differences(
+    dtm_t1: np.ndarray,
+    dtm_t2: np.ndarray,
+    chm_t1: np.ndarray,
+    chm_t2: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calculates geomorphic and canopy change grids between two coregistered dates (Questions A3, C3).
+
+    - delta_dtm > 0: Aeolian sand accretion / burial
+    - delta_dtm < 0: Wind deflation / erosion
+    - delta_chm > 0: Biological growth / lateral expansion
+    - delta_chm < 0: Physical canopy burial or seasonal senescence
     """
     if dtm_t1.shape != dtm_t2.shape or chm_t1.shape != chm_t2.shape:
-        raise ValueError(
-            "The two epochs must be on the same grid (same shape). rasters() builds its grid "
-        )
-    delta_dtm = dtm_t2 - dtm_t1
-    delta_chm = chm_t2 - chm_t1
-    return delta_dtm, delta_chm
+        raise ValueError("Epoch grids must share identical pixel dimensions.")
+    return dtm_t2 - dtm_t1, chm_t2 - chm_t1
