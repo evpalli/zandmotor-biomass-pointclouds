@@ -76,7 +76,13 @@ def main(input_las_path: str, output_las_path: str, grid_res: float = 0.10,
     # 1. Ground filtering (CSF)
     print(" start ground_filter.py")
     final_ground_idx, final_veg_idx = classify_ground_and_vegetation(las, planarity_thresh=0.65, linearity_thresh=0.30, sphericity_thresh=0.15)
+    # Save ground/vegetation classification for CloudCompare
+    ground_veg_class = np.zeros(n_pts, dtype=np.uint8)
 
+    ground_veg_class[final_ground_idx] = 1
+    ground_veg_class[final_veg_idx] = 2
+
+    write_dim(las,"ground_veg_class",ground_veg_class,np.uint8)
     #  2. Rasters -> CHM/DTM/DSM/Slope calculation on 2D grid -> already differentiation between veg and ground idx
     print("start DTM / CHM / slope rasters (terrain_aba.py)")
     dtm, chm, slope_deg, bounds = rasters(coords, final_ground_idx, final_veg_idx, grid_res=grid_res)
@@ -84,7 +90,7 @@ def main(input_las_path: str, output_las_path: str, grid_res: float = 0.10,
     save_rasters(prefix, dtm, chm, slope_deg, bounds, las)
     print("calculate height above ground (terrain_aba.py)")
     ground_z = sample_raster(dtm, bounds, coords[:, 0], coords[:, 1])
-    height_above_ground = (coords[:, 2] - ground_z).astype(np.float32)
+    height_above_ground = (coords[:, 2] - ground_z).astype(np.float32) 
     slope_pt = sample_raster(slope_deg, bounds, coords[:, 0], coords[:, 1]).astype(np.float32)
     print("write DIM (terrain_aba.py)")
     write_dim(las, "height_above_ground", height_above_ground, np.float32)
@@ -132,7 +138,7 @@ def main(input_las_path: str, output_las_path: str, grid_res: float = 0.10,
     # Calculate geometric features for each entire vegetation cluster
     cluster_features = []
     for cluster_id, group in pts.groupby("cluster_id"):
-        coords = group[["x", "y", "z"]].to_numpy()
+        cluster_coords = group[["x", "y", "z"]].to_numpy()
         planarity, linearity, sphericity = (compute_geometric_features(cluster_coords))
         cluster_features.append({"cluster_id": cluster_id,
                                 "planarity": planarity,
