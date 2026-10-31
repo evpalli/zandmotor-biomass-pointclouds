@@ -1,0 +1,4 @@
+patch,footprint_m2,h_max,vol_column,agb_low_kg,agb_mid_kg,agb_high_kg
+largest,3.14,0.896,1.008,0.302,0.807,1.412
+medium,0.92,0.43,0.219,0.066,0.175,0.306
+smallest,0.14,0.249,0.025,0.007,0.02,0.035

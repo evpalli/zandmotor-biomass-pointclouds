@@ -1,0 +1,11 @@
+numpy
+scipy
+pandas
+matplotlib
+scikit-learn
+laspy[lazrs]
+cloth-simulation-filter
+jupyterlab
+nbformat
+nbclient
+ipykernel
