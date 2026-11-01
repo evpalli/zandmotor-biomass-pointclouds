@@ -1,1062 +1,428 @@
-<<<<<<< Updated upstream
-from pathlib import Path
-=======
+"""helpers.py - ALL helper functions of the project in one file, used by the three notebooks (A, B, C).
+
+Sections:  1 settings (edit here)  |  2 reading the data  |  3 ground / vegetation separation
+           4 tussocks and volumes  |  5 maps, change through time, plots
+Every function is short and has a one-line description. Nothing else is needed (no modules folder).
 """
-MODULE: main.py
-PURPOSE:
-    Main pipeline for the dune LiDAR workflow.
-
-    - A1: LAS/LAZ point-cloud characteristics.
-    - C2: DTM, CHM and terrain-slope raster generation.
-    - A3/C3: Optional multi-epoch DTM and CHM change detection.
-    - Existing workflow: ground/vegetation classification, VARI,
-      vegetation clustering, geometric features, volume estimates,
-      species typing and enriched LAS/LAZ output.
-
-EXPECTED PROJECT STRUCTURE:
-    project/
-        main.py
-        modules/
-            __init__.py
-            terrain_aba.py
-            ground_filter.py
-            spectral_typing.py
-            biomass_itd.py
-
-EXAMPLE:
-    python main.py epoch1.laz out.laz --grid-res 0.25
-
-    python main.py epoch1.laz out.laz \
-        --compare-with epoch2.laz --grid-res 0.25
-
-NOTES:
-    - This script expects terrain_aba.py to expose:
-      characteristics(), rasters(), and epoch_differences().
-    - The updated terrain_aba.py shown in the conversation does not
-      expose sample_raster(), so a compatible sampler is implemented here.
-    - GeoTIFF output is optional and requires rasterio.
-"""
-
-import argparse
-import logging
-from collections import defaultdict
+import os
+import pickle
 from pathlib import Path
-from types import SimpleNamespace
 
 import laspy
->>>>>>> Stashed changes
+import matplotlib.pyplot as plt
 import numpy as np
-import laspy
-from scipy.spatial import cKDTree, ConvexHull
-import CSF
-import gc
 import pandas as pd
+from scipy import ndimage as ndi
 from scipy.interpolate import griddata
-from scipy.spatial.distance import pdist
-
-<<<<<<< Updated upstream
-def initialise_grid_ABA(las):
-
-    # Extract X, Y, and Z coordinates
-    x = las.x
-    y = las.y
-    z = las.z
-=======
-from modules.biomass_itd import (
-    alpha_shape_vol,
-    compute_geometric_features,
-    convex_hull_vol,
-    voxel_3d,
-    export_voxels_to_obj,
-)
-from modules.ground_filter import classify_ground_and_vegetation
-from modules.spectral_typing import (
-    classify_pioneer_morphology,
-    compute_vari,
-)
-from modules.terrain_aba import (
-    characteristics,
-    rasters,
-    epoch_differences,
-)
-
-try:
-    import rasterio
-    from rasterio.transform import from_origin
-except ImportError:
-    rasterio = None
-    from_origin = None
->>>>>>> Stashed changes
-
-    points = np.column_stack((x, y))
-    values = z
-
-<<<<<<< Updated upstream
-    # Define the grid resolution
-    resolution = 2.0 
-    x_min, x_max = x.min(), x.max()
-    y_min, y_max = y.min(), y.max()
-
-    grid_x, grid_y = np.mgrid[x_min:x_max:resolution, y_min:y_max:resolution]
-
-    grid_z = griddata(points, values, (grid_x, grid_y), method="linear")
-    
-    return grid_x, grid_y, grid_z, points, values
-    '''
-    auf we want to visualise it
-
-    plt.subplot(221)
-    plt.imshow(func(grid_x, grid_y).T, extent=(0,1,0,1), origin='lower')
-    plt.plot(points[:,0], points[:,1], 'k.', ms=1)
-    plt.title('Original')
-    plt.subplot(222)
-    plt.imshow(grid_z0.T, extent=(0,1,0,1), origin='lower')
-    plt.title('Nearest')
-    plt.subplot(223)
-    plt.imshow(grid_z1.T, extent=(0,1,0,1), origin='lower')
-    plt.title('Linear')
-    plt.subplot(224)
-    plt.imshow(grid_z2.T, extent=(0,1,0,1), origin='lower')
-    plt.title('Cubic')
-    plt.gcf().set_size_inches(6, 6)
-    plt.show()
-    '''
-
-def run_csf_ground_filter(coords, resolution=0.6, rigidness=2, threshold=0.12):
-    """Ground separation via Cloth Simulation Filtering (CSF)."""
-    csf = CSF.CSF()
-    csf.params.bSloopSmooth = True
-    csf.params.cloth_resolution = resolution
-    csf.params.rigidness = rigidness
-    csf.params.class_threshold = threshold
-    csf.params.time_step = 0.65
-    csf.params.interations = 500
-
-    csf.setPointCloud(coords.tolist())
-    ground_indices = CSF.VecInt()
-    non_ground_indices = CSF.VecInt()
-    csf.do_filtering(ground_indices, non_ground_indices, False)
-
-    return np.array(ground_indices), np.array(non_ground_indices)
-
-def classify_grids(points, values, ground_indices, non_ground_indices, grid_x, grid_y):
-    """Generates independent grids for ground and non-ground points."""
-
-    grid_ground = griddata(points[ground_indices], values[ground_indices], (grid_x, grid_y), method="linear")
-    return grid_ground, grid_non_ground
-
-def compute_geometric_features(coords, candidate_idx, radius=0.20, min_neighbors=8):
-    """Refinement computing eigenvalue descriptors (Kucak, 2022)."""
-    kdtree = cKDTree(coords)
-    candidate_pts = coords[candidate_idx]
-    n_candidates = len(candidate_pts)
-
-    planarity = np.zeros(n_candidates, dtype=np.float32)
-    linearity = np.zeros(n_candidates, dtype=np.float32)
-    sphericity = np.zeros(n_candidates, dtype=np.float32)
-
-    for i, pt in enumerate(candidate_pts):
-        neighbor_indices = kdtree.query_ball_point(pt, r=radius)
-        if len(neighbor_indices) >= min_neighbors:
-            neighbors = coords[neighbor_indices]
-            cov = np.cov(neighbors, rowvar=False)
-
-            eigenvalues = np.linalg.eigvalsh(cov)
-            eigenvalues = np.sort(np.maximum(eigenvalues, 1e-9))[::-1]
-            l1, l2, l3 = eigenvalues[0], eigenvalues[1], eigenvalues[2]
-
-            planarity[i] = (l2 - l3) / l1
-            linearity[i] = (l1 - l2) / l1
-            sphericity[i] = l3 / l1
-
-    return planarity, linearity, sphericity
-
-def predictory_variables(grid_ground, grid_non_ground, non_ground_coords):
-    """
-    - Tree height (via Canopy Height Model difference)
-    - Crown diameter (via max pairwise distance on convex hull vertices)
-    - Crown density (via 2D histogram of raw non-ground points)
-    - ConvexHull of non-ground point cloud
-    """
-    # Canopy Height Model (CHM) difference
-    chm = grid_non_ground - grid_ground
-    tree_height = np.nanmax(chm)
-
-    convexhull = ConvexHull(non_ground_coords)
-    hull_pts = non_ground_coords[hull.vertices]
-    crown_diameter = np.max(pdist(hull_pts, metric='euclidean'))
-
-    crown_density, _, _ = np.histogram2d(non_ground_coords[:, 0], non_ground_coords[:, 1], bins=10)
-
-    return chm, tree_height, convexhull, crown_diameter, crown_density
-
-# chekc later if we want to keep this
-def CHM(coords, veg_idx, ground_idx, grid_resolution=0.25):
-    ground_pts = coords[ground_idx]
-    veg_pts = coords[veg_idx]
-
-    # Grid bounds
-    x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
-    y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
-
-    ncols = int(np.ceil((x_max - x_min) / grid_resolution)) + 1
-    nrows = int(np.ceil((y_max - y_min) / grid_resolution)) + 1
-
-    # Map point coordinates directly to grid cell row/col indices
-    def points_to_grid(pts):
-        col_idx = np.floor((pts[:, 0] - x_min) / grid_resolution).astype(np.int32)
-        row_idx = np.floor((pts[:, 1] - y_min) / grid_resolution).astype(np.int32)
-        col_idx = np.clip(col_idx, 0, ncols - 1)
-        row_idx = np.clip(row_idx, 0, nrows - 1)
-        return row_idx, col_idx
-
-    # Initialize Rasters
-    dtm = np.full((nrows, ncols), np.nan, dtype=np.float32)
-    dsm = np.full((nrows, ncols), np.nan, dtype=np.float32)
-
-    if len(ground_pts) > 0:
-        g_rows, g_cols = points_to_grid(ground_pts)
-        flat_idx = g_rows * ncols + g_cols
-        # np.minimum.at handles duplicates per cell efficiently
-        flat_dtm = np.full(nrows * ncols, np.inf, dtype=np.float32)
-        np.minimum.at(flat_dtm, flat_idx, ground_pts[:, 2])
-        flat_dtm[np.isinf(flat_dtm)] = np.nan
-        dtm = flat_dtm.reshape((nrows, ncols))
-
-    if len(veg_pts) > 0:
-        v_rows, v_cols = points_to_grid(veg_pts)
-        flat_idx = v_rows * ncols + v_cols
-        flat_dsm = np.full(nrows * ncols, -np.inf, dtype=np.float32)
-        np.maximum.at(flat_dsm, flat_idx, veg_pts[:, 2])
-        flat_dsm[np.isneginf(flat_dsm)] = np.nan
-        dsm = flat_dsm.reshape((nrows, ncols))
-
-    default_ground = np.nanmin(ground_pts[:, 2]) if len(ground_pts) > 0 else 0.0
-    dtm = np.nan_to_num(dtm, nan=default_ground)
-    dsm = np.nan_to_num(dsm, nan=dtm)
-
-    chm = np.maximum(dsm - dtm, 0.0)
-    
-    grid_x = np.linspace(x_min, x_max, ncols)
-    grid_y = np.linspace(y_min, y_max, nrows)
-
-    return chm, grid_x, grid_y
-
-# has not been adapted to aba style
-def main(input_laz: str, output_laz: str):
-    print(f"Loading point cloud: {input_laz}")
-    las = laspy.read(input_laz)
-    coords = np.vstack((las.x, las.y, las.z)).transpose()
-    total_points = len(coords)
-
-    # 1. CSF Filter
-    ground_idx, candidate_veg_idx = run_csf_ground_filter(coords)
-    print(f"CSF ground: {len(ground_idx)}, candidate veg: {len(candidate_veg_idx)}")
-
-    # 2. Geometric Covariance Refinement
-    print("Computing eigenvalue geometric features...")
-    planarity, linearity, sphericity = compute_geometric_features(coords, candidate_veg_idx)
-
-    # 3. Filter remaining planar sand residuals
-    is_true_veg = (planarity < 0.65) & ((linearity > 0.30) | (sphericity > 0.15))
-    final_veg_idx = candidate_veg_idx[is_true_veg]
-    residual_sand_idx = candidate_veg_idx[~is_true_veg]
-    final_ground_idx = np.concatenate((ground_idx, residual_sand_idx))
-
-    # 4. Standard ASPRS Classification
-    las.classification[:] = 0
-    las.classification[final_ground_idx] = 2  # Ground
-    las.classification[final_veg_idx] = 4     # Medium/Low Vegetation
-
-    # 5. Compute Predictor Variables
-    height, diameter, density, volume = predictory_variables(coords, final_veg_idx, final_ground_idx, radius=0.5, min_neighbors=4)
-
-    # 6. Generate Canopy Height Model (CHM)
-    chm, grid_x, grid_y = CHM(coords, final_veg_idx, final_ground_idx, grid_resolution=0.1)
-
-    # 5. Add custom scalar fields to the single file for CloudCompare
-    print("Adding diagnostic scalar fields...")
-    las.add_extra_dim(laspy.ExtraBytesParams(name="stage_csf", type=np.uint8))
-    las.add_extra_dim(laspy.ExtraBytesParams(name="stage_refined", type=np.uint8))
-    las.add_extra_dim(laspy.ExtraBytesParams(name="planarity", type=np.float32))
-    las.add_extra_dim(laspy.ExtraBytesParams(name="tree_height", type=np.float32))
-    las.add_extra_dim(laspy.ExtraBytesParams(name="crown_diameter", type=np.float32))
-    las.add_extra_dim(laspy.ExtraBytesParams(name="crown_density", type=np.float32))
-    las.add_extra_dim(laspy.ExtraBytesParams(name="crown_volume", type=np.float32))
-
-    # Stage 1 flag: 1 = Candidate vegetation after CSF, 0 = Ground
-    stage1 = np.zeros(total_points, dtype=np.uint8)
-    stage1[candidate_veg_idx] = 1
-    las.stage_csf = stage1
-
-    # Stage 2 flag: 1 = Confirmed vegetation after eigenvalues, 0 = Ground
-    stage2 = np.zeros(total_points, dtype=np.uint8)
-    stage2[final_veg_idx] = 1
-    las.stage_refined = stage2
-
-    # Continuous Planarity field
-    full_planarity = np.zeros(total_points, dtype=np.float32)
-    full_planarity[candidate_veg_idx] = planarity
-    las.planarity = full_planarity
-  # height, diameter, density, volume 
-    full_tree_height = np.zeros(total_points, dtype=np.float32)
-    full_tree_height[final_veg_idx] = height
-    las.tree_height = full_tree_height
-
-    full_crown_diam = np.zeros(total_points, dtype=np.float32)
-    full_crown_diam[final_veg_idx] = diameter
-    las.crown_diameter = full_crown_diam
-
-    full_density = np.zeros(total_points, dtype=np.float32)
-    full_density[final_veg_idx] = density
-    las.crown_density = full_density
-
-    full_volume = np.zeros(total_points, dtype=np.float32)
-    full_volume[final_veg_idx] = volume
-    las.crown_volume = full_volume
-    # Ensure output directory exists and write
-    Path(output_laz).parent.mkdir(parents=True, exist_ok=True)
-    las.write(output_laz)
-    print(f"Classified multi-stage file saved to: {output_laz}")
-
-=======
-# LAS classification codes (ASPRS standard).
-GROUND_CLASS = 2
-VEGETATION_CLASSES = [3, 4, 5]
-
-SPECIES_CODES = {
-    "Dry Drift / Senescent Matter": 1,
-    "Ammophila arenaria (Marram Grass)": 2,
-    "Elytrigia juncea (Sand Couch)": 3,
-    "Unclassified (missing RGB or too few points)": 4,
-}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
-
-def write_dim(las, name, values, dtype):
-    """Add or overwrite a per-point LAS extra dimension."""
-    values = np.asarray(values, dtype=dtype)
-
-    if len(values) != len(las.points):
-        raise ValueError(
-            f"Dimension '{name}' has {len(values)} values; "
-            f"expected {len(las.points)}."
-        )
-
-    if name not in las.point_format.dimension_names:
-        las.add_extra_dim(
-            laspy.ExtraBytesParams(name=name, type=dtype)
-        )
-
-    setattr(las, name, values)
-
-
-def sample_raster(raster, bounds, x, y):
-    """
-    Sample a north-up raster using the same indexing convention
-    as terrain_aba.rasters(): row 0 is at y_max.
-    """
-    x = np.asarray(x)
-    y = np.asarray(y)
-
-    cols = np.floor(
-        (x - bounds["x_min"]) / bounds["grid_res"]
-    ).astype(np.int64)
-
-    rows = np.floor(
-        (bounds["y_max"] - y) / bounds["grid_res"]
-    ).astype(np.int64)
-
-    cols = np.clip(cols, 0, bounds["ncols"] - 1)
-    rows = np.clip(rows, 0, bounds["nrows"] - 1)
-
-    return raster[rows, cols]
-
-
-def save_rasters(prefix, dtm, chm, slope_deg, bounds, las):
-    """
-    Save raster arrays to NPZ and, when rasterio is installed,
-    to a three-band GeoTIFF.
-
-    terrain_aba.rasters() indexes row 0 from y_max downward,
-    which already matches the standard north-up GeoTIFF layout.
-    Therefore, the arrays are not vertically flipped.
-    """
-    prefix = Path(prefix)
-    npz_path = prefix.parent / f"{prefix.name}_rasters.npz"
-
-    np.savez_compressed(
-        npz_path,
-        dtm=dtm.astype(np.float32),
-        chm=chm.astype(np.float32),
-        slope_deg=slope_deg.astype(np.float32),
-        x_min=bounds["x_min"],
-        x_max=bounds["x_max"],
-        y_min=bounds["y_min"],
-        y_max=bounds["y_max"],
-        grid_res=bounds["grid_res"],
-        nrows=bounds["nrows"],
-        ncols=bounds["ncols"],
-    )
-    logger.info("Raster NPZ saved: %s", npz_path)
-
-    if rasterio is None:
-        logger.warning(
-            "rasterio is not installed; skipping GeoTIFF output. "
-            "Install it with: pip install rasterio"
-        )
-        return
-
-    crs = las.header.parse_crs()
-    crs_wkt = crs.to_wkt() if crs is not None else None
-    res = bounds["grid_res"]
-
-    tif_path = prefix.parent / f"{prefix.name}_rasters.tif"
-    transform = from_origin(
-        bounds["x_min"],
-        bounds["y_max"],
-        res,
-        res,
-    )
-
-    with rasterio.open(
-        tif_path,
-        "w",
-        driver="GTiff",
-        height=bounds["nrows"],
-        width=bounds["ncols"],
-        count=3,
-        dtype="float32",
-        crs=crs_wkt,
-        transform=transform,
-        nodata=np.nan,
-        compress="deflate",
-    ) as dst:
-        for band, (array, description) in enumerate(
-            (
-                (dtm, "DTM"),
-                (chm, "CHM"),
-                (slope_deg, "slope_deg"),
-            ),
-            start=1,
-        ):
-            dst.write(array.astype(np.float32), band)
-            dst.set_band_description(band, description)
-
-    logger.info("GeoTIFF saved: %s", tif_path)
-
-
-def common_bounds(coords_a, coords_b):
-    """Return the overlapping XY extent for two point clouds."""
-    bounds = {
-        "x_min": float(max(coords_a[:, 0].min(), coords_b[:, 0].min())),
-        "x_max": float(min(coords_a[:, 0].max(), coords_b[:, 0].max())),
-        "y_min": float(max(coords_a[:, 1].min(), coords_b[:, 1].min())),
-        "y_max": float(min(coords_a[:, 1].max(), coords_b[:, 1].max())),
-    }
-
-    if (
-        bounds["x_min"] >= bounds["x_max"]
-        or bounds["y_min"] >= bounds["y_max"]
-    ):
-        raise ValueError(
-            "The two epochs do not have an overlapping XY extent."
-        )
-
-    return bounds
-
-
-def load_las(path):
-    """Read a LAS/LAZ file and return its LAS object and XYZ array."""
-    path = Path(path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Input point cloud not found: {path}")
-
-    las = laspy.read(path)
-    if len(las.points) == 0:
-        raise ValueError(f"Point cloud is empty: {path}")
-
-    coords = np.column_stack((las.x, las.y, las.z)).astype(np.float64)
-    valid = np.isfinite(coords).all(axis=1)
-
-    if not valid.all():
-        logger.warning(
-            "%s contains %d invalid coordinate records; excluding them "
-            "from raster and feature calculations.",
-            path.name,
-            int((~valid).sum()),
-        )
-
-    return las, coords, valid
-
-
-# ---------------------------------------------------------------------
-# Optional multi-epoch comparison
-# ---------------------------------------------------------------------
-
-def compare_epochs(
-    las_a,
-    coords_a,
-    ground_a,
-    veg_a,
-    las_b,
-    coords_b,
-    ground_b,
-    veg_b,
-    output_prefix,
-    grid_res,
-):
-    """
-    Rasterize two epochs on one shared overlapping grid and calculate
-    DTM and CHM differences (epoch B minus epoch A).
-    """
-    bounds = common_bounds(coords_a, coords_b)
-
-    dtm_a, chm_a, slope_a, raster_bounds = rasters(
-        coords_a,
-        ground_a,
-        veg_a,
-        grid_res=grid_res,
-        bounds_override=bounds,
-    )
-
-    dtm_b, chm_b, slope_b, _ = rasters(
-        coords_b,
-        ground_b,
-        veg_b,
-        grid_res=grid_res,
-        bounds_override=bounds,
-    )
-
-    delta_dtm, delta_chm = epoch_differences(
-        dtm_a,
-        dtm_b,
-        chm_a,
-        chm_b,
-    )
-
-    change_path = output_prefix.parent / (
-        f"{output_prefix.name}_epoch_changes.npz"
-    )
-
-    np.savez_compressed(
-        change_path,
-        dtm_epoch_a=dtm_a,
-        dtm_epoch_b=dtm_b,
-        chm_epoch_a=chm_a,
-        chm_epoch_b=chm_b,
-        slope_epoch_a=slope_a,
-        slope_epoch_b=slope_b,
-        delta_dtm=delta_dtm,
-        delta_chm=delta_chm,
-        x_min=raster_bounds["x_min"],
-        x_max=raster_bounds["x_max"],
-        y_min=raster_bounds["y_min"],
-        y_max=raster_bounds["y_max"],
-        grid_res=raster_bounds["grid_res"],
-        nrows=raster_bounds["nrows"],
-        ncols=raster_bounds["ncols"],
-    )
-
-    logger.info("Epoch change rasters saved: %s", change_path)
-    logger.info(
-        "DTM change: min %.3f m, max %.3f m, mean %.3f m",
-        float(np.nanmin(delta_dtm)),
-        float(np.nanmax(delta_dtm)),
-        float(np.nanmean(delta_dtm)),
-    )
-    logger.info(
-        "CHM change: min %.3f m, max %.3f m, mean %.3f m",
-        float(np.nanmin(delta_chm)),
-        float(np.nanmax(delta_chm)),
-        float(np.nanmean(delta_chm)),
-    )
-
-
-# ---------------------------------------------------------------------
-# Main single-epoch processing pipeline
-# ---------------------------------------------------------------------
-
-def main(
-    input_las_path,
-    output_las_path,
-    grid_res=0.10,
-    voxel_size=0.5,
-    compute_alpha=True,
-    compare_with=None,
-):
-    input_path = Path(input_las_path)
-    out_path = Path(output_las_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    prefix = out_path.with_suffix("")
-
-    if grid_res <= 0 or voxel_size <= 0:
-        raise ValueError("grid_res and voxel_size must be greater than zero.")
-
-    # A1: point-cloud characteristics.
-    stats_paths = [str(input_path)]
-    if compare_with:
-        stats_paths.append(str(compare_with))
-
-    stats = characteristics(stats_paths)
-    stats_path = prefix.parent / f"{prefix.name}_characteristics.csv"
-    stats.to_csv(stats_path, index=False)
-    logger.info("Point-cloud characteristics saved: %s", stats_path)
-
-    # Load primary epoch.
-    las, coords, valid = load_las(input_path)
-    n_points = len(las.points)
-
-    # Ground filtering expects an input LAS/LAZ path and returns a
-    # dictionary containing integer point-index arrays (not Boolean masks).
-    logger.info("Starting ground/vegetation classification.")
-    ground_result = classify_ground_and_vegetation(
-        str(input_path),
-        output_laz_path=None,
-        planarity_threshold=0.65,
-        linearity_threshold=0.30,
-        sphericity_threshold=0.15,
-    )
-
-    # Convert the returned point indices into Boolean masks for rasters().
-    ground_idx = np.zeros(n_points, dtype=bool)
-    veg_idx = np.zeros(n_points, dtype=bool)
-    ground_idx[np.asarray(ground_result["ground_idx"], dtype=np.int64)] = True
-    veg_idx[np.asarray(ground_result["veg_idx"], dtype=np.int64)] = True
-
-    if len(ground_idx) != n_points or len(veg_idx) != n_points:
-        raise ValueError("Ground-filter masks do not match the LAS point count.")
-
-    # Exclude invalid coordinates from the masks used for rasterization.
-    ground_for_raster = ground_idx & valid
-    veg_for_raster = veg_idx & valid
-
-    ground_veg_class = np.zeros(n_points, dtype=np.uint8)
-    ground_veg_class[ground_idx] = 1
-    ground_veg_class[veg_idx] = 2
-    write_dim(las, "ground_veg_class", ground_veg_class, np.uint8)
-
-    # C2: DTM, CHM and slope.
-    logger.info("Generating DTM, CHM and slope rasters.")
-    dtm, chm, slope_deg, bounds = rasters(
-        coords,
-        ground_for_raster,
-        veg_for_raster,
-        grid_res=grid_res,
-    )
-
-    save_rasters(prefix, dtm, chm, slope_deg, bounds, las)
-
-    # Per-point height above ground and terrain slope.
-    logger.info("Sampling DTM and slope at point locations.")
-    ground_z = sample_raster(
-        dtm, bounds, coords[:, 0], coords[:, 1]
-    )
-    height_above_ground = (
-        coords[:, 2] - ground_z
-    ).astype(np.float32)
-
-    slope_pt = sample_raster(
-        slope_deg, bounds, coords[:, 0], coords[:, 1]
-    ).astype(np.float32)
-
-    # Set invalid point results to NaN.
-    height_above_ground[~valid] = np.nan
-    slope_pt[~valid] = np.nan
-
-    write_dim(
-        las, "height_above_ground", height_above_ground, np.float32
-    )
-    write_dim(las, "slope_deg", slope_pt, np.float32)
-
-    # VARI spectral index.
-    logger.info("Calculating VARI.")
-    dimension_names = set(las.point_format.dimension_names)
-    rgb_available = {"red", "green", "blue"}.issubset(dimension_names)
-
-    if rgb_available:
-        vari = compute_vari(
-            np.asarray(las.red),
-            np.asarray(las.green),
-            np.asarray(las.blue),
-        )
-        vari = np.asarray(vari, dtype=np.float32)
+from scipy.spatial import ConvexHull, Delaunay, QhullError, cKDTree
+import subprocess
+import struct
+
+# =============================================================================== 1. SETTINGS (edit here)
+ROOT = Path(__file__).resolve().parent
+CLIPS_DIR = ROOT / "data" / "clips"        # put your .laz clips here (any sub-folders)
+MERGED_DIR = ROOT / "data" / "merged"      # made by prepare_data.py: one file per epoch
+CACHE_DIR = ROOT / "data" / "cache"        # results of the ground / vegetation separation
+FIG_DIR, TAB_DIR = ROOT / "figures", ROOT / "tables"
+for _d in (MERGED_DIR, CACHE_DIR, FIG_DIR, TAB_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+# study area in RD New (metres): x_min, y_min, x_max, y_max  (default = around the manual biomass samples)
+BOX = tuple(float(v) for v in os.environ["BOX"].split(",")) if "BOX" in os.environ else (72200.0, 451600.0, 72500.0, 451900.0)
+EPOCH_LABEL = {"20230927": "Sep 2023", "20240227": "Feb 2024", "20240501": "May 2024", "20240607": "Jun 2024",
+               "20240717": "Jul 2024", "20250327": "Mar 2025", "20250514": "May 2025", "20260204": "Feb 2026",
+               "20261007": "Oct 2026"}
+DENSITY = 250.0          # every epoch is thinned to this many points / m2, so epochs are comparable
+H_MIN, H_MAX = 0.10, 1.5  # vegetation = between 10 cm (sand noise is ~3 cm) and 1.5 m above the ground
+EPS, MIN_SAMPLES = 0.20, 8  # DBSCAN: points closer than 20 cm belong to the same tussock
+RHO = dict(low=0.3, mid=0.8, high=1.4)   # kg dry biomass per m3 of canopy volume. PLACEHOLDER - replace / tune!
+BLOCK_M = 5.0            # block size for maps (m)
+DTM_RES, FINE_RES = 0.25, 0.10   # raster cell sizes (m)
+
+
+def epochs():
+    """Epochs for which a merged file exists, in time order."""
+    return [e for e in EPOCH_LABEL if (MERGED_DIR / f"{e}_field.laz").exists()]
+
+
+# =============================================================================== 2. READING
+def read_points(epoch, density=DENSITY, box=None, seed=0):
+    """Read one merged epoch, crop to the study area and thin randomly to `density` points/m2. Returns dict x, y, z, rgb."""
+    x0, y0, x1, y1 = box or BOX
+    las = laspy.read(MERGED_DIR / f"{epoch}_field.laz")
+    x, y, z = np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)
+    keep = (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+    if density:
+        frac = min(1.0, density * (x1 - x0) * (y1 - y0) / max(keep.sum(), 1))
+        keep &= np.random.default_rng(seed).random(len(x)) < frac
+    rgb = np.column_stack([las.red, las.green, las.blue])[keep].astype(np.float32)
+    rgb /= 255.0 if rgb.max() <= 255 else 65535.0
+    return {"x": x[keep], "y": y[keep], "z": z[keep], "rgb": rgb}
+
+
+def describe_files(epoch_list):
+    """A1: points, extent, density, spacing and attributes of every epoch in the study area (before thinning)."""
+    f = MERGED_DIR / "epoch_stats.csv"
+    st = pd.read_csv(f, dtype={"epoch": str}).set_index("epoch") if f.exists() else None
+    area = (BOX[2] - BOX[0]) * (BOX[3] - BOX[1])
+    rows = []
+    for e in epoch_list:
+        with laspy.open(MERGED_DIR / f"{e}_field.laz") as r:
+            h = r.header
+            n = int(st.loc[e, "points_in_area"]) if st is not None else h.point_count
+            rows.append({"epoch": EPOCH_LABEL[e], "points": n,
+                         "x range (m)": f"{h.mins[0]:.0f}-{h.maxs[0]:.0f}", "y range (m)": f"{h.mins[1]:.0f}-{h.maxs[1]:.0f}",
+                         "z range (m)": f"{h.mins[2]:.2f}-{h.maxs[2]:.2f}", "density (pts/m2)": round(n / area, 1),
+                         "spacing (cm)": round(100 / np.sqrt(n / area), 1), "has RGB": "red" in h.point_format.dimension_names})
+    return pd.DataFrame(rows)
+
+
+# =============================================================================== 3. GROUND / VEGETATION SEPARATION
+def make_grid(res, box=None):
+    """A raster grid over the study area: dict with x0 (left), y1 (top), res, nr rows, nc columns."""
+    x0, y0, x1, y1 = box or BOX
+    return {"x0": x0, "y1": y1, "res": res, "nr": int(np.ceil((y1 - y0) / res)), "nc": int(np.ceil((x1 - x0) / res))}
+
+
+def cell_of(g, x, y):
+    """Flat cell index of every point on grid g, and a mask of the points that fall inside the grid."""
+    c = np.floor((x - g["x0"]) / g["res"]).astype(np.int64)
+    r = np.floor((g["y1"] - y) / g["res"]).astype(np.int64)
+    ok = (c >= 0) & (c < g["nc"]) & (r >= 0) & (r < g["nr"])
+    return r * g["nc"] + c, ok
+
+
+def cell_stat(g, x, y, v, how="median"):
+    """Per-cell median / max / mean / count of values v (NaN where a cell has no points)."""
+    idx, ok = cell_of(g, x, y)
+    s = pd.Series(np.asarray(v)[ok]).groupby(idx[ok]).agg(how)
+    out = np.full(g["nr"] * g["nc"], np.nan, np.float32)
+    out[s.index.values] = s.values
+    return out.reshape(g["nr"], g["nc"])
+
+
+def fill_holes(a):
+    """Fill empty (NaN) cells: linear interpolation, nearest value outside the data."""
+    bad = ~np.isfinite(a)
+    if not bad.any():
+        return a
+    r, c = np.nonzero(~bad)
+    out = a.astype(np.float64).copy()
+    out[bad] = griddata(np.column_stack((c, r)), a[~bad], np.column_stack(np.nonzero(bad)[::-1]), method="linear")
+    left = ~np.isfinite(out)
+    if left.any():
+        i = ndi.distance_transform_edt(left, return_distances=False, return_indices=True)
+        out[left] = out[i[0][left], i[1][left]]
+    return out.astype(np.float32)
+
+
+def sample(a, g, x, y):
+    """Value of raster a (grid g) at positions x, y (bilinear)."""
+    return ndi.map_coordinates(a.astype(np.float64), [(g["y1"] - y) / g["res"] - 0.5, (x - g["x0"]) / g["res"] - 0.5],
+                               order=1, mode="nearest")
+
+
+def slope_deg(dtm, res):
+    """Terrain slope in degrees (DTM smoothed over ~1 m first)."""
+    gy, gx = np.gradient(ndi.gaussian_filter(dtm.astype(np.float64), 1.0 / res), res)
+    return np.degrees(np.arctan(np.hypot(gx, gy))).astype(np.float32)
+
+def PTD_ground(xyz, output_ptd="out_ptd.laz"):
+    x = np.asarray(xyz[:, 0], dtype=np.float64)
+    y = np.asarray(xyz[:, 1], dtype=np.float64)
+    z = np.asarray(xyz[:, 2], dtype=np.float64)
+
+    npoints = len(x)
+    print(f"Loaded {npoints:,} points for PTD filtering")
+
+    # Write binary coordinates
+    with open("coordinates.bin", "wb") as f:
+        f.write(struct.pack("I", npoints))
+        x.tofile(f)
+        y.tofile(f)
+        z.tofile(f)
+
+    # Run C++ PTD (omitting bbox.bin)
+    subprocess.run([
+        "./PTD/build/ptd_run",
+        "coordinates.bin",
+        "ground_indices.txt"], check=True)
+
+    ground = np.atleast_1d(np.loadtxt("ground_indices.txt", dtype=np.uint32))
+    all_indices = np.arange(npoints, dtype=np.uint32)
+    non_ground = np.setdiff1d(all_indices, ground)
+
+    return np.array(ground, dtype=np.int64), np.array(non_ground, dtype=np.int64)
+
+def csf_ground(xyz, resolution=0.5, rigidness=2, threshold=0.10):
+    """Cloth Simulation Filter: returns the indices of ground points and of non-ground candidates."""
+    import CSF
+    c = CSF.CSF()
+    c.params.bSloopSmooth, c.params.cloth_resolution, c.params.rigidness = True, resolution, rigidness
+    c.params.class_threshold, c.params.time_step, c.params.interations = threshold, 0.65, 500   # (sic) library spelling
+    c.setPointCloud(np.ascontiguousarray(xyz, dtype=np.float64))
+    g, ng = CSF.VecInt(), CSF.VecInt()
+    c.do_filtering(g, ng, False)
+    return np.array(g, dtype=np.int64), np.array(ng, dtype=np.int64)
+
+
+def low_outliers(xyz, drop=0.40):
+    """True for points more than `drop` m below the median height of their 1 m cell (noise that pulls the cloth down)."""
+    g = make_grid(1.0, (xyz[:, 0].min(), xyz[:, 1].min(), xyz[:, 0].max() + 1, xyz[:, 1].max() + 1))
+    med = cell_stat(g, xyz[:, 0], xyz[:, 1], xyz[:, 2], "median").ravel()
+    idx, ok = cell_of(g, xyz[:, 0], xyz[:, 1])
+    return xyz[:, 2] < med[np.clip(idx, 0, med.size - 1)] - drop
+
+
+def local_shape(xyz, idx, radius=0.20, k=48, min_neighbours=8, chunk=50_000):
+    """Eigenvalue shape of the neighbourhood (radius 20 cm) of points xyz[idx]: planarity, linearity, sphericity.
+    Points with too few neighbours get NaN and sparse=True."""
+    tree = cKDTree(xyz)
+    out = {n: np.full(len(idx), np.nan, np.float32) for n in ("planarity", "linearity", "sphericity")}
+    sparse = np.zeros(len(idx), bool)
+    for s in range(0, len(idx), chunk):
+        sel = slice(s, s + chunk)
+        d, i = tree.query(xyz[idx[sel]], k=k, distance_upper_bound=radius, workers=-1)
+        ok = np.isfinite(d); i[~ok] = 0
+        n = ok.sum(1); P = xyz[i]
+        mean = (P * ok[..., None]).sum(1) / np.maximum(n, 1)[:, None]
+        D = (P - mean[:, None, :]) * ok[..., None]
+        ev = np.linalg.eigvalsh(np.einsum("nki,nkj->nij", D, D) / np.maximum(n - 1, 1)[:, None, None])   # l3 <= l2 <= l1
+        l3, l2, l1 = ev[:, 0], ev[:, 1], np.maximum(ev[:, 2], 1e-12)
+        good = n >= min_neighbours
+        out["linearity"][sel] = np.where(good, (l1 - l2) / l1, np.nan)
+        out["planarity"][sel] = np.where(good, (l2 - l3) / l1, np.nan)
+        out["sphericity"][sel] = np.where(good, l3 / l1, np.nan)
+        sparse[sel] = ~good
+    return out, sparse
+
+
+def separate(p,method_ground_classification):
+    """THE METHOD (A4/B1). Input: points p (x, y, z, rgb). Steps:
+    1 remove low outliers  2 CSF -> ground + candidates  3 DTM from the ground  4 candidates are vegetation if they are
+    10 cm - 1.5 m above the DTM (a bit more on slopes) and not flat (eigenvalue shape)  5 final DTM + rasters."""
+    keep = ~low_outliers(np.column_stack([p["x"], p["y"], p["z"]]))
+    x, y, z, rgb = p["x"][keep], p["y"][keep], p["z"][keep], p["rgb"][keep]
+    xyz = np.column_stack([x, y, z])
+    gd, gf = make_grid(DTM_RES), make_grid(FINE_RES)
+
+    # Choose ground filtering method
+    if method_ground_classification.lower() == "ptd":
+        ground, cand = PTD_ground(xyz)
     else:
-        logger.warning(
-            "RGB dimensions are missing. VARI and RGB-based species "
-            "typing will be unavailable."
-        )
-        vari = np.full(n_points, np.nan, dtype=np.float32)
+        ground, cand = csf_ground(xyz)
 
-    if len(vari) != n_points:
-        raise ValueError("compute_vari() must return one value per point.")
-
-    vari[~valid] = np.nan
-    write_dim(las, "vari", vari, np.float32)
-
-    # Initialize per-point vegetation outputs.
-    tussock_id = np.zeros(n_points, dtype=np.uint32)
-    species_class = np.zeros(n_points, dtype=np.uint8)
-
-    veg_planarity = np.full(n_points, np.nan, dtype=np.float32)
-    veg_linearity = np.full(n_points, np.nan, dtype=np.float32)
-    veg_sphericity = np.full(n_points, np.nan, dtype=np.float32)
-
-    vol_voxel = np.full(n_points, np.nan, dtype=np.float32)
-    vol_hull = np.full(n_points, np.nan, dtype=np.float32)
-    vol_alpha = np.full(n_points, np.nan, dtype=np.float32)
-
-    # Keep only valid vegetation points for clustering.
-    veg_point_mask = veg_for_raster
-    veg_coords = coords[veg_point_mask]
-    veg_original_indices = np.flatnonzero(veg_point_mask)
-
-    table = pd.DataFrame()
-
-    if len(veg_coords) > 0:
-        logger.info("Starting 3D vegetation voxel clustering.")
-
-        veg_xyz = SimpleNamespace(
-            x=veg_coords[:, 0],
-            y=veg_coords[:, 1],
-            z=veg_coords[:, 2],
-        )
-
-        (
-            voxel_set,
-            voxel_indices,
-            components,
-            component_id,
-            veg_id_volume,
-            total_volume,
-            points,
-            point_cluster_ids,
-        ) = voxel_3d(
-            veg_xyz,
-            connectivity = 8,
-            voxel_size=voxel_size
-        )
-
-        # Export voxel geometry beside the output LAS/LAZ.
-        obj_path = prefix.parent / f"{prefix.name}_voxels_{connectivity}.obj"
-        export_voxels_to_obj(
-            voxel_set,
-            voxel_size=voxel_size,
-            output_path=str(obj_path),
-        )
-        logger.info("Voxel OBJ saved: %s", obj_path)
-
-        # Map each vegetation point to its connected-component ID.
-        unique_voxels, inverse = np.unique(
-            voxel_indices,
-            axis=0,
-            return_inverse=True,
-        )
-        inverse = inverse.reshape(-1)
-
-        unique_ids = np.fromiter(
-            (components[tuple(v)] for v in unique_voxels),
-            dtype=np.int64,
-            count=len(unique_voxels),
-        )
-        veg_cluster_ids = unique_ids[inverse]
-
-        pts = pd.DataFrame(
-            {
-                "cluster_id": veg_cluster_ids,
-                "x": veg_coords[:, 0],
-                "y": veg_coords[:, 1],
-                "z": veg_coords[:, 2],
-                "height_above_ground":
-                    height_above_ground[veg_original_indices],
-                "ground_z": ground_z[veg_original_indices],
-                "slope_deg": slope_pt[veg_original_indices],
-                "vari": vari[veg_original_indices],
-            }
-        )
-
-        # Cluster-level geometric features.
-        cluster_features = []
-        for cluster_id, group in pts.groupby("cluster_id"):
-            cluster_coords = group[["x", "y", "z"]].to_numpy()
-            planarity, linearity, sphericity = (
-                compute_geometric_features(cluster_coords)
-            )
-            cluster_features.append(
-                {
-                    "cluster_id": cluster_id,
-                    "planarity": planarity,
-                    "linearity": linearity,
-                    "sphericity": sphericity,
-                }
-            )
-
-        cluster_features = pd.DataFrame(cluster_features)
-
-        # Cluster summary table.
-        table = pts.groupby("cluster_id").agg(
-            point_count=("x", "size"),
-            centroid_x=("x", "mean"),
-            centroid_y=("y", "mean"),
-            centroid_z=("z", "mean"),
-            ground_z=("ground_z", "mean"),
-            height_above_ground_max=("height_above_ground", "max"),
-            height_above_ground_mean=("height_above_ground", "mean"),
-            slope_deg_mean=("slope_deg", "mean"),
-            slope_deg_median=("slope_deg", "median"),
-            vari_median=("vari", "median"),
-        )
-
-        table = table.join(
-            cluster_features.set_index("cluster_id")
-        )
-
-        # Volume estimates for each cluster.
-        voxels_by_cluster = defaultdict(list)
-        for voxel, cluster_id in components.items():
-            voxels_by_cluster[cluster_id].append(voxel)
-
-        table["volume_voxel_m3"] = (
-            pd.Series(veg_id_volume).reindex(table.index)
-        )
-
-        table["volume_convex_hull_m3"] = [
-            convex_hull_vol(
-                points[point_cluster_ids == cluster_id]
-            )
-            for cluster_id in table.index
-        ]
-
-        if compute_alpha:
-            table["volume_alpha_shape_m3"] = [
-                alpha_shape_vol(
-                    points[point_cluster_ids == cluster_id]
-                )
-                for cluster_id in table.index
-            ]
-        else:
-            table["volume_alpha_shape_m3"] = np.nan
-
-        # Species/morphology classification.
-        labels = []
-        for _, row in table.iterrows():
-            height = row["height_above_ground_max"]
-            linearity = row["linearity"]
-            vari_value = row["vari_median"]
-
-            if np.isfinite([height, linearity, vari_value]).all():
-                # Use the function imported from the current
-                # spectral_typing module.
-                label = classify_pioneer_morphology(
-                    height,
-                    linearity,
-                    vari_value,
-                )
-            else:
-                label = (
-                    "Unclassified "
-                    "(missing RGB or too few points)"
-                )
-
-            labels.append(label)
-
-        table["species"] = labels
-        table["species_code"] = (
-            table["species"]
-            .map(SPECIES_CODES)
-            .fillna(4)
-            .astype(np.uint8)
-        )
-
-        # Broadcast cluster-level values back to vegetation points.
-        def spread(column):
-            return table[column].reindex(
-                veg_cluster_ids
-            ).to_numpy()
-
-        tussock_id[veg_original_indices] = veg_cluster_ids.astype(
-            np.uint32
-        )
-        species_class[veg_original_indices] = spread(
-            "species_code"
-        ).astype(np.uint8)
-
-        veg_planarity[veg_original_indices] = spread(
-            "planarity"
-        ).astype(np.float32)
-        veg_linearity[veg_original_indices] = spread(
-            "linearity"
-        ).astype(np.float32)
-        veg_sphericity[veg_original_indices] = spread(
-            "sphericity"
-        ).astype(np.float32)
-
-        vol_voxel[veg_original_indices] = spread(
-            "volume_voxel_m3"
-        ).astype(np.float32)
-        vol_hull[veg_original_indices] = spread(
-            "volume_convex_hull_m3"
-        ).astype(np.float32)
-        vol_alpha[veg_original_indices] = spread(
-            "volume_alpha_shape_m3"
-        ).astype(np.float32)
-
-        for species, count in table["species"].value_counts().items():
-            logger.info("%s: %d clusters", species, count)
-
-    else:
-        logger.warning(
-            "No vegetation points were identified. "
-            "Skipping clustering, volume estimation and species typing."
-        )
-
-    # Add vegetation and cluster attributes to LAS/LAZ.
-    extra_dimensions = (
-        ("tussock_id", tussock_id, np.uint32),
-        ("species_class", species_class, np.uint8),
-        ("veg_planarity", veg_planarity, np.float32),
-        ("veg_linearity", veg_linearity, np.float32),
-        ("veg_sphericity", veg_sphericity, np.float32),
-        ("vol_voxel_m3", vol_voxel, np.float32),
-        ("vol_convex_hull_m3", vol_hull, np.float32),
-        ("vol_alpha_shape_m3", vol_alpha, np.float32),
-    )
-
-    for name, values, dtype in extra_dimensions:
-        write_dim(las, name, values, dtype)
-
-    # Save cluster-level CSV.
-    csv_path = prefix.parent / f"{prefix.name}_tussocks.csv"
-    table.reset_index().to_csv(csv_path, index=False)
-    logger.info("Tussock table saved: %s", csv_path)
-
-    # Save enriched LAS/LAZ.
-    logger.info("Saving enriched point cloud: %s", out_path)
-    las.write(str(out_path))
->>>>>>> Stashed changes
-
-    # Optional second epoch: shared-grid raster comparison.
-    if compare_with:
-        logger.info("Loading comparison epoch: %s", compare_with)
-
-        las_b, coords_b, valid_b = load_las(compare_with)
-
-        ground_result_b = classify_ground_and_vegetation(
-            str(compare_with),
-            output_laz_path=None,
-            planarity_threshold=0.65,
-            linearity_threshold=0.30,
-            sphericity_threshold=0.15,
-        )
-
-        ground_b = np.zeros(len(las_b.points), dtype=bool)
-        veg_b = np.zeros(len(las_b.points), dtype=bool)
-        ground_b[np.asarray(ground_result_b["ground_idx"], dtype=np.int64)] = True
-        veg_b[np.asarray(ground_result_b["veg_idx"], dtype=np.int64)] = True
-
-        ground_b &= valid_b
-        veg_b &= valid_b
-
-        compare_epochs(
-            las,
-            coords,
-            ground_for_raster,
-            veg_for_raster,
-            las_b,
-            coords_b,
-            ground_b,
-            veg_b,
-            prefix,
-            grid_res,
-        )
-
-    logger.info("Pipeline completed successfully.")
+    dtm = fill_holes(cell_stat(gd, x[ground], y[ground], z[ground]))
+    hag = z - sample(dtm, gd, x, y)
+    slope = slope_deg(dtm, DTM_RES)
+    h_min = lambda i: H_MIN + 0.5 * DTM_RES * np.tan(np.radians(sample(slope, gd, x[i], y[i])))   # slope-aware gate
+    shape, sparse = local_shape(xyz, cand)
+    flat = (shape["planarity"] >= 0.65) | ((shape["linearity"] <= 0.30) & (shape["sphericity"] <= 0.15))
+    is_veg = (hag[cand] >= h_min(cand)) & (hag[cand] <= H_MAX) & (sparse | ~flat)
+    ground = np.concatenate([ground, cand[~is_veg]])                       # candidates that are not vegetation are ground too
+    dtm = fill_holes(cell_stat(gd, x[ground], y[ground], z[ground]))      # final, cleaner DTM
+    slope = slope_deg(dtm, DTM_RES)
+    hag = z - sample(dtm, gd, x, y)
+    veg = cand[is_veg]
+    veg = veg[(hag[veg] >= h_min(veg)) & (hag[veg] <= H_MAX)]            # same gates on the final DTM
+    bright, exg = rgb.mean(1), 2 * rgb[:, 1] - rgb[:, 0] - rgb[:, 2]
+    shape_v, _ = local_shape(xyz, veg)
+    isveg = np.zeros(len(x), bool); isveg[veg] = True
+    idx, ok = cell_of(gf, x, y)
+    n = gf["nr"] * gf["nc"]
+    return {"grid_dtm": gd, "grid_fine": gf, "dtm": dtm, "slope": slope,
+            "chm": cell_stat(gf, x, y, np.maximum(hag, 0), "max"),
+            "npts": np.bincount(idx[ok], minlength=n).reshape(gf["nr"], gf["nc"]),
+            "veg_count": np.bincount(idx[ok & isveg], minlength=n).reshape(gf["nr"], gf["nc"]),
+            "veg": {"x": x[veg], "y": y[veg], "z": z[veg], "hag": hag[veg], "rgb": rgb[veg], "brightness": bright[veg],
+                    "exg": exg[veg], **shape_v},
+            "n_points": len(x), "n_veg": len(veg)}
 
 
-# ---------------------------------------------------------------------
-# Command-line interface
-# ---------------------------------------------------------------------
+def process(epoch, force=False):
+    """Read + separate one epoch; the result is cached in data/cache so it is only computed once."""
+    f = CACHE_DIR / f"{epoch}.pkl"
+    if f.exists() and not force:
+        return pickle.load(open(f, "rb"))
+    R = separate(read_points(epoch)); R["epoch"] = epoch
+    pickle.dump(R, open(f, "wb"))
+    return R
 
-if __name__ == "__main__":
-<<<<<<< Updated upstream
-    input_file = "data/20261007_north-F001-S001_RD.laz"
-    output_file = "/Users/belinaileen/Desktop/2026_001_out.laz"
-    main(input_file, output_file)
 
-'''
-Identify type of vegetation exists on Zandmotor, focus on the specific geometry to 
-narrow down specific vegetation type
+def cover(R):
+    """Vegetation cover raster (True/False, 0.10 m cells). Isolated 1-2 cell false alarms are removed."""
+    lab, n = ndi.label(R["veg_count"] > 0)
+    size = np.bincount(lab.ravel())
+    return (size[lab] >= 3) & (lab > 0)
 
-Main 2 approaches: Area-based Allocation (ABA) or Individual tree Detection for Biomass Estimation
-1. ABA
-2. ITD
 
--> next step: rationale between the different vegetation/forest type suitability which which approach ABA/ITD
-https://www.tandfonline.com/doi/pdf/10.1080/17538947.2026.2723552
-https://www.sciencedirect.com/science/article/pii/S1470160X25005400
-'''
-=======
-    parser = argparse.ArgumentParser(
-        description="Dune LiDAR ABA, vegetation and multi-epoch pipeline."
-    )
+def cover_m2(R):
+    return cover(R).sum() * R["grid_fine"]["res"] ** 2
 
-    parser.add_argument(
-        "input",
-        nargs="?",
-        default="data_drone/20261007_north-F001-S001_RD.laz",
-        help="Input LAS/LAZ point cloud.",
-    )
 
-    parser.add_argument(
-        "output",
-        nargs="?",
-        default="out.laz",
-        help="Output enriched LAS/LAZ file.",
-    )
+def has_data(R):
+    """True where the epoch really has LiDAR points (judged on 1 m cells), on the 0.10 m grid."""
+    k = int(round(1 / FINE_RES)); g = R["grid_fine"]
+    occ = block_reduce(R["npts"].astype(float), k, "sum") > 0
+    out = np.zeros((g["nr"], g["nc"]), bool); m = np.kron(occ, np.ones((k, k), bool))
+    out[:m.shape[0], :m.shape[1]] = m[:g["nr"], :g["nc"]]
+    return out
 
-    parser.add_argument(
-        "--compare-with",
-        default=None,
-        help="Optional second LAS/LAZ epoch for DTM/CHM change detection.",
-    )
 
-    parser.add_argument(
-        "--grid-res",
-        type=float,
-        default=0.25,
-        help="Raster cell size in metres (default: 0.25).",
-    )
+def to_dtm_grid(a_fine, R):
+    """Resample a 0.10 m raster to the 0.25 m grid (nearest cell centre)."""
+    gd, gf = R["grid_dtm"], R["grid_fine"]
+    ri = np.minimum(((np.arange(gd["nr"]) + .5) * gd["res"] / gf["res"]).astype(int), a_fine.shape[0] - 1)
+    ci = np.minimum(((np.arange(gd["nc"]) + .5) * gd["res"] / gf["res"]).astype(int), a_fine.shape[1] - 1)
+    return a_fine[np.ix_(ri, ci)]
 
-    parser.add_argument(
-        "--voxel-size",
-        type=float,
-        default=0.5,
-        help="Voxel edge length in metres (default: 0.5).",
-    )
 
-    parser.add_argument(
-        "--no-alpha",
-        action="store_true",
-        help="Skip alpha-shape volume calculations.",
-    )
+# =============================================================================== 4. TUSSOCKS AND VOLUMES
+def vol_column(xyh, cell=0.10):
+    """Volume = sum over 10 cm columns of (highest point above ground x cell area). Closed at the base. MAIN METHOD."""
+    ij = np.floor((xyh[:, :2] - xyh[:, :2].min(0)) / cell).astype(np.int64)
+    return float(pd.Series(xyh[:, 2]).groupby(ij[:, 0] * (ij[:, 1].max() + 1) + ij[:, 1]).max().sum() * cell * cell)
 
-    args = parser.parse_args()
 
-    main(
-        input_las_path=args.input,
-        output_las_path=args.output,
-        grid_res=args.grid_res,
-        voxel_size=args.voxel_size,
-        compute_alpha=not args.no_alpha,
-        compare_with=args.compare_with,
-    )
->>>>>>> Stashed changes
+def vol_hull(xyh):
+    """Convex hull volume (points are also projected down to the ground so the hull is closed at the base)."""
+    base = xyh.copy(); base[:, 2] = 0
+    try:
+        return float(ConvexHull(np.vstack([xyh, base])).volume)
+    except (QhullError, ValueError):
+        return np.nan
+
+
+def vol_voxel(xyh, voxel=0.05):
+    """Number of occupied voxels x voxel volume (porous lower bound - depends strongly on the voxel size)."""
+    ijk = np.floor((xyh - xyh.min(0)) / voxel).astype(np.int64)
+    return float(len(np.unique(ijk, axis=0)) * voxel ** 3)
+
+
+def vol_alpha(xyh, radius=0.15, max_pts=30000):
+    """Alpha-shape volume: union of the Delaunay tetrahedra whose circumscribed sphere has radius <= `radius`."""
+    P = np.unique(np.round(xyh, 3), axis=0)
+    if len(P) < 5:
+        return np.nan
+    if len(P) > max_pts:
+        P = P[np.random.default_rng(0).choice(len(P), max_pts, replace=False)]
+    try:
+        s = P[Delaunay(P).simplices]
+    except (QhullError, ValueError):
+        return np.nan
+    u, v, w = s[:, 1] - s[:, 0], s[:, 2] - s[:, 0], s[:, 3] - s[:, 0]
+    det = np.einsum("ij,ij->i", u, np.cross(v, w))
+    num = (u * u).sum(1)[:, None] * np.cross(v, w) + (v * v).sum(1)[:, None] * np.cross(w, u) + (w * w).sum(1)[:, None] * np.cross(u, v)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        R = np.linalg.norm(num, axis=1) / (2 * np.abs(det))
+    return float((np.abs(det)[np.isfinite(R) & (R <= radius)] / 6).sum())
+
+
+def tussocks(R, eps=EPS, min_samples=MIN_SAMPLES, min_height=H_MIN, voxel=0.05, alpha_radius=0.15, alpha=True, rho=None):
+    """B2/B3: find tussocks with DBSCAN on the vegetation points; one row per tussock with size, 4 volumes and biomass."""
+    from sklearn.cluster import DBSCAN
+    v = R["veg"]; rho = rho or RHO
+    lab = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit_predict(np.column_stack([v["x"], v["y"]]))
+    order = np.argsort(lab, kind="stable"); sl = lab[order]
+    ids = np.unique(sl[sl >= 0])
+    rows = []
+    for cid, s, e in zip(ids, np.searchsorted(sl, ids), np.searchsorted(sl, ids, side="right")):
+        i = order[s:e]
+        if len(i) < 30:
+            continue
+        xyh = np.column_stack([v["x"][i], v["y"][i], v["hag"][i]]); h = xyh[:, 2]
+        foot = len(np.unique(np.floor((xyh[:, :2] - xyh[:, :2].min(0)) / 0.10).astype(np.int64), axis=0)) * 0.01
+        if h.max() < min_height or h.max() > H_MAX or h.max() / np.sqrt(max(foot, 1e-6)) > 1.5:
+            continue          # too low (noise), too tall (pole / person) or too thin (stake) to be a tussock
+        ev = np.sort(np.linalg.eigvalsh(np.cov(xyh.T)))[::-1]
+        cx, cy = xyh[:, 0].mean(), xyh[:, 1].mean()
+        rows.append({"epoch": R["epoch"], "x": cx, "y": cy, "n_pts": len(i), "footprint_m2": foot, "h_max": h.max(),
+                     "h_p95": np.percentile(h, 95), "linearity": (ev[0] - ev[1]) / ev[0], "planarity": (ev[1] - ev[2]) / ev[0],
+                     "sphericity": ev[2] / ev[0], "brightness": v["brightness"][i].mean(), "exg": v["exg"][i].mean(),
+                     "slope_deg": float(sample(R["slope"], R["grid_dtm"], np.array([cx]), np.array([cy]))[0]),
+                     "vol_column": vol_column(xyh), "vol_hull": vol_hull(xyh), "vol_voxel": vol_voxel(xyh, voxel),
+                     "vol_alpha": vol_alpha(xyh, alpha_radius) if alpha else np.nan})
+    t = pd.DataFrame(rows)
+    for k in ("low", "mid", "high"):
+        t[f"agb_{k}_kg"] = t["vol_column"] * rho[k] if len(t) else []     # BIOMASS = VOLUME x RHO
+    return t
+
+
+# =============================================================================== 5. MAPS, CHANGE THROUGH TIME
+def block_reduce(a, n, how="mean"):
+    """Aggregate n x n cells (mean / sum / max); NaN-aware."""
+    nr, nc = (a.shape[0] // n) * n, (a.shape[1] // n) * n
+    b = a[:nr, :nc].astype(np.float64).reshape(nr // n, n, nc // n, n)
+    f = {"mean": np.nanmean, "sum": np.nansum, "max": np.nanmax}[how]
+    with np.errstate(all="ignore"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore"); return f(b, axis=(1, 3))
+
+
+def blocks(R, t=None, n_m=BLOCK_M):
+    """Cover, tussock volume / biomass, slope, height and data coverage per 5 m block (for maps and the research question)."""
+    t = tussocks(R, alpha=False) if t is None else t
+    gd, gf = R["grid_dtm"], R["grid_fine"]
+    nf, nd = int(round(n_m / gf["res"])), int(round(n_m / gd["res"]))
+    cov = block_reduce(cover(R).astype(float), nf, "sum") * gf["res"] ** 2
+    share = block_reduce(block_reduce(R["npts"].astype(float), 10, "sum") > 0, int(n_m), "mean")
+    vol, agb, cnt = np.zeros(cov.shape), np.zeros(cov.shape), np.zeros(cov.shape)
+    if len(t):
+        c = np.floor((t.x.values - gd["x0"]) / n_m).astype(int); r = np.floor((gd["y1"] - t.y.values) / n_m).astype(int)
+        ok = (r >= 0) & (r < cov.shape[0]) & (c >= 0) & (c < cov.shape[1])
+        np.add.at(vol, (r[ok], c[ok]), t.vol_column.values[ok]); np.add.at(agb, (r[ok], c[ok]), t.agb_mid_kg.values[ok])
+        np.add.at(cnt, (r[ok], c[ok]), 1)
+    rr, cc = np.indices(cov.shape)
+    return pd.DataFrame({"epoch": R["epoch"], "row": rr.ravel(), "col": cc.ravel(),
+                         "x": gd["x0"] + (cc.ravel() + .5) * n_m, "y": gd["y1"] - (rr.ravel() + .5) * n_m,
+                         "cover_m2": cov.ravel(), "n_tussocks": cnt.ravel(), "vol_m3": vol.ravel(), "agb_mid_kg": agb.ravel(),
+                         "slope_deg": block_reduce(R["slope"], nd, "mean").ravel(), "z_nap": block_reduce(R["dtm"], nd, "mean").ravel(),
+                         "data_share": share.ravel()})
+
+
+def common_area(all_blocks, min_share=0.9):
+    """Keep only blocks that have LiDAR data in EVERY epoch - otherwise totals through time are not comparable."""
+    ok = all_blocks[all_blocks.data_share > min_share].groupby(["row", "col"]).size()
+    keep = ok[ok == all_blocks.epoch.nunique()].index
+    return all_blocks[pd.MultiIndex.from_frame(all_blocks[["row", "col"]]).isin(keep)]
+
+
+def block_image(df, column):
+    """2D array (rows x columns) of one block column - for imshow maps."""
+    a = np.full((df.row.max() + 1, df.col.max() + 1), np.nan)
+    a[df.row.values, df.col.values] = df[column].values
+    return a
+
+
+def ground_change(R1, R2, slope_max=5.0):
+    """Ground height change R2 - R1 (m) where both epochs have data, and its 95 % level of detection (from flat cells)."""
+    ok = to_dtm_grid(has_data(R1) & has_data(R2), R1)
+    d = np.where(ok, R2["dtm"] - R1["dtm"], np.nan)
+    flat = d[(R1["slope"] < slope_max) & np.isfinite(d)]
+    med = np.median(flat); sigma = 1.4826 * np.median(np.abs(flat - med))
+    return d, {"median": med, "sigma": sigma, "lod95": 1.96 * sigma}
+
+
+def hillshade(R, az=315.0, alt=45.0):
+    """Shaded relief of the DTM (for map backgrounds); NaN where the epoch has no data."""
+    g = R["grid_dtm"]
+    gy, gx = np.gradient(R["dtm"].astype(np.float64), g["res"])
+    s, a = np.arctan(np.hypot(gx, gy)), np.arctan2(-gx, gy)
+    hs = np.clip(np.cos(np.radians(90 - alt)) * np.cos(s) + np.sin(np.radians(90 - alt)) * np.sin(s) * np.cos(np.radians(360 - az + 90) - a), 0, 1)
+    return np.where(to_dtm_grid(has_data(R), R), hs, np.nan)
+
+
+def extent(g):
+    """imshow extent (x_min, x_max, y_min, y_max) of grid g."""
+    return (g["x0"], g["x0"] + g["nc"] * g["res"], g["y1"] - g["nr"] * g["res"], g["y1"])
+
+
+def save(fig, name):
+    fig.savefig(FIG_DIR / f"{name}.png", dpi=200, bbox_inches="tight")
+
+
+def table(df, name):
+    """Save a table as CSV (for the report) and return it for display."""
+    df.to_csv(TAB_DIR / f"{name}.csv", index=False)
+    return df
