@@ -15,6 +15,8 @@ import pandas as pd
 from scipy import ndimage as ndi
 from scipy.interpolate import griddata
 from scipy.spatial import ConvexHull, Delaunay, QhullError, cKDTree
+import subprocess
+import struct
 
 # =============================================================================== 1. SETTINGS (edit here)
 ROOT = Path(__file__).resolve().parent
@@ -26,7 +28,7 @@ for _d in (MERGED_DIR, CACHE_DIR, FIG_DIR, TAB_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # study area in RD New (metres): x_min, y_min, x_max, y_max  (default = around the manual biomass samples)
-BOX = tuple(float(v) for v in os.environ["BOX"].split(",")) if "BOX" in os.environ else (72290.0, 451410.0, 72510.0, 451640.0)
+BOX = tuple(float(v) for v in os.environ["BOX"].split(",")) if "BOX" in os.environ else (72200.0, 451600.0, 72500.0, 451900.0)
 EPOCH_LABEL = {"20230927": "Sep 2023", "20240227": "Feb 2024", "20240501": "May 2024", "20240607": "Jun 2024",
                "20240717": "Jul 2024", "20250327": "Mar 2025", "20250514": "May 2025", "20260204": "Feb 2026",
                "20261007": "Oct 2026"}
@@ -125,6 +127,32 @@ def slope_deg(dtm, res):
     gy, gx = np.gradient(ndi.gaussian_filter(dtm.astype(np.float64), 1.0 / res), res)
     return np.degrees(np.arctan(np.hypot(gx, gy))).astype(np.float32)
 
+def PTD_ground(xyz, output_ptd="out_ptd.laz"):
+    x = np.asarray(xyz[:, 0], dtype=np.float64)
+    y = np.asarray(xyz[:, 1], dtype=np.float64)
+    z = np.asarray(xyz[:, 2], dtype=np.float64)
+
+    npoints = len(x)
+    print(f"Loaded {npoints:,} points for PTD filtering")
+
+    # Write binary coordinates
+    with open("coordinates.bin", "wb") as f:
+        f.write(struct.pack("I", npoints))
+        x.tofile(f)
+        y.tofile(f)
+        z.tofile(f)
+
+    # Run C++ PTD (omitting bbox.bin)
+    subprocess.run([
+        "./PTD/build/ptd_run",
+        "coordinates.bin",
+        "ground_indices.txt"], check=True)
+
+    ground = np.atleast_1d(np.loadtxt("ground_indices.txt", dtype=np.uint32))
+    all_indices = np.arange(npoints, dtype=np.uint32)
+    non_ground = np.setdiff1d(all_indices, ground)
+
+    return np.array(ground, dtype=np.int64), np.array(non_ground, dtype=np.int64)
 
 def csf_ground(xyz, resolution=0.5, rigidness=2, threshold=0.10):
     """Cloth Simulation Filter: returns the indices of ground points and of non-ground candidates."""
@@ -169,7 +197,7 @@ def local_shape(xyz, idx, radius=0.20, k=48, min_neighbours=8, chunk=50_000):
     return out, sparse
 
 
-def separate(p):
+def separate(p,method_ground_classification):
     """THE METHOD (A4/B1). Input: points p (x, y, z, rgb). Steps:
     1 remove low outliers  2 CSF -> ground + candidates  3 DTM from the ground  4 candidates are vegetation if they are
     10 cm - 1.5 m above the DTM (a bit more on slopes) and not flat (eigenvalue shape)  5 final DTM + rasters."""
@@ -177,7 +205,13 @@ def separate(p):
     x, y, z, rgb = p["x"][keep], p["y"][keep], p["z"][keep], p["rgb"][keep]
     xyz = np.column_stack([x, y, z])
     gd, gf = make_grid(DTM_RES), make_grid(FINE_RES)
-    ground, cand = csf_ground(xyz)
+
+    # Choose ground filtering method
+    if method_ground_classification.lower() == "ptd":
+        ground, cand = PTD_ground(xyz)
+    else:
+        ground, cand = csf_ground(xyz)
+
     dtm = fill_holes(cell_stat(gd, x[ground], y[ground], z[ground]))
     hag = z - sample(dtm, gd, x, y)
     slope = slope_deg(dtm, DTM_RES)
