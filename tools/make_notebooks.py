@@ -40,24 +40,37 @@ for dens in [30, 60, 125, 250, 400]:           # 400 = the maximum kept by prepa
 H.table(pd.DataFrame(rows), "A1_density_experiment")'''),
 ("md", "**To write (A1):** compare the epochs (points, density, extent, attributes) and discuss the experiment above: at low density small and low plants are missed, so cover is a lower bound and epochs must be compared at the same density (that is why every epoch is thinned to 250 pts/m2)."),
 ("md", "## A2 - Three vegetation examples and bare sand\nTop: canopy height (m). Bottom: the points with their real RGB colour."),
-("code", '''t = H.tussocks(R[E]); top = t.sort_values("vol_column", ascending=False).head(3).reset_index(drop=True)
+("code", '''t = H.tussocks(R[E])
+ok = t[(t.vol_column >= 0.3) & (t.planarity < 0.5) & (t.h_p95 > 0.4)]            # clear 3D plants, not diffuse low patches
+pick = []                                                                         # three visually different shapes
+for col in ["vol_column", "linearity", "sphericity"]:
+    pick.append(ok.drop(index=pick).nlargest(1, col).index[0])
+top = ok.loc[pick].reset_index(drop=True); top["patch"] = ["Plant 1 (largest)", "Plant 2 (most elongated)", "Plant 3 (most compact)"]
 bl = H.blocks(R[E], t); sand = bl[(bl.cover_m2 == 0) & (bl.slope_deg < 5) & (bl.data_share > .95)].sort_values("slope_deg").iloc[0]
-spots = [(r.x, r.y, f"Plant {i+1}") for i, r in top.iterrows()] + [(sand.x, sand.y, "Bare sand")]
-gf = R[E]["grid_fine"]; v = R[E]["veg"]; h = 2.5
-sand_pts = H.read_points(E, box=(sand.x - 5, sand.y - 5, sand.x + 5, sand.y + 5))
-fig, axs = plt.subplots(2, 4, figsize=(11, 5.5))
+spots = [(r.x, r.y, r.patch) for r in top.itertuples()] + [(sand.x, sand.y, "Bare sand")]
+SUM = "20240717" if "20240717" in EP else EP[len(EP) // 2]                       # a summer epoch: plants are greener than in March
+gf = R[E]["grid_fine"]; h = 2.5
+fig, axs = plt.subplots(3, 4, figsize=(11, 8.2))
 for j, (x, y, name) in enumerate(spots):
     c0, c1 = int((x - h - gf["x0"]) / gf["res"]), int((x + h - gf["x0"]) / gf["res"]); r0, r1 = int((gf["y1"] - y - h) / gf["res"]), int((gf["y1"] - y + h) / gf["res"])
-    im = axs[0, j].imshow(R[E]["chm"][r0:r1, c0:c1], extent=(x-h, x+h, y-h, y+h), vmin=0, vmax=1, cmap="YlGn"); axs[0, j].set_title(name)
-    if name == "Bare sand": p = sand_pts; xx, yy, cc = p["x"], p["y"], p["rgb"]
-    else: m = (abs(v["x"] - x) < h) & (abs(v["y"] - y) < h); xx, yy, cc = v["x"][m], v["y"][m], v["rgb"][m]
-    axs[1, j].scatter(xx, yy, c=np.clip(cc, 0, 1), s=3); axs[1, j].set_xlim(x-h, x+h); axs[1, j].set_ylim(y-h, y+h); axs[1, j].set_aspect("equal")
+    im = axs[0, j].imshow(R[E]["chm"][r0:r1, c0:c1], extent=(-h, h, -h, h), vmin=0, vmax=1, cmap="YlGn"); axs[0, j].set_title(name, fontsize=8)
+    for i, e in [(1, E), (2, SUM)]:
+        if name == "Bare sand": p = H.read_points(e, box=(x - h, y - h, x + h, y + h)); xx, yy, cc = p["x"], p["y"], p["rgb"]
+        else: v = R[e]["veg"]; m = (abs(v["x"] - x) < h) & (abs(v["y"] - y) < h); xx, yy, cc = v["x"][m], v["y"][m], v["rgb"][m]
+        axs[i, j].scatter(xx - x, yy - y, c=np.clip(cc, 0, 1), s=3); axs[i, j].set_xlim(-h, h); axs[i, j].set_ylim(-h, h); axs[i, j].set_aspect("equal")
+    for i in range(3): axs[i, j].set_xlabel("x (m from centre)", fontsize=7); axs[i, j].tick_params(labelsize=7)
+axs[0, 0].set_ylabel("canopy height\\n" + H.EPOCH_LABEL[E], fontsize=8); axs[1, 0].set_ylabel("real colour\\n" + H.EPOCH_LABEL[E] + " (winter)", fontsize=8); axs[2, 0].set_ylabel("real colour\\n" + H.EPOCH_LABEL[SUM] + " (summer)", fontsize=8)
 fig.colorbar(im, ax=axs[0, :], label="canopy height (m)", shrink=.8); H.save(fig, "A2_patches")'''),
-("code", '''sb, sx = sand_pts["rgb"].mean(1), 2 * sand_pts["rgb"][:, 1] - sand_pts["rgb"][:, 0] - sand_pts["rgb"][:, 2]
-H.table(pd.concat([
-    top[["x", "y", "n_pts", "footprint_m2", "h_max", "h_p95", "vol_column", "linearity", "planarity", "sphericity", "brightness", "exg"]].round(3).assign(patch=["Plant 1", "Plant 2", "Plant 3"]),
-    pd.DataFrame([{"patch": "Bare sand (points)", "brightness": sb.mean(), "exg": sx.mean()}]).round(3)]), "A2_patch_attributes")'''),
-("md", "**To write (A2):** for each plant the most likely type (from height, footprint, shape: tall dense dome vs. low sparse tuft; there are no species labels in the field data, say so). Which attributes helped: height above ground and shape (linearity / planarity) separate plants from sand best; compare brightness / ExG of the plants with the sand in the table (dry vegetation is dark, so greenness alone is weak)."),
+("code", '''cols = ["x", "y", "n_pts", "footprint_m2", "h_max", "h_p95", "vol_column", "linearity", "planarity", "sphericity"]
+H.table(top[["patch"] + cols].round(3), "A2_patch_attributes")
+rows = []                                                                         # colour of plants vs sand, winter and summer
+for e in [E, SUM]:
+    for r in top.itertuples():
+        v = R[e]["veg"]; m = (abs(v["x"] - r.x) < 2.5) & (abs(v["y"] - r.y) < 2.5)
+        rows.append({"patch": r.patch, "epoch": H.EPOCH_LABEL[e], "veg points": int(m.sum()), **(H.colour_stats(v["rgb"][m]) if m.sum() > 5 else {})})
+    p = H.read_points(e, box=(sand.x - 2.5, sand.y - 2.5, sand.x + 2.5, sand.y + 2.5)); rows.append({"patch": "Bare sand", "epoch": H.EPOCH_LABEL[e], "veg points": 0, **H.colour_stats(p["rgb"])})
+H.table(pd.DataFrame(rows).round(3), "A2_colour_by_season")'''),
+("md", "**To write (A2):** for each plant the most likely type (from height, footprint, shape: tall dense dome vs. low sparse tuft; there are no species labels in the field data, say so). Which attributes helped: height above ground and shape (linearity / planarity) separate plants from sand best; compare brightness / ExG / VARI of the plants with the sand in `A2_colour_by_season`. In winter (Mar 2025) marram is dormant and brown, so greenness separates poorly; compare with the summer row (Jul 2024). The three plants are picked by shape (largest, most elongated, most compact), not by hand."),
 ("md", "## A3 - One location through time\nA 12 x 12 m window around the largest plant, in every epoch (canopy height, m)."),
 ("code", '''x0, y0 = top.x[0], top.y[0]; h = 6; n = len(EP); cols = 4; fig, axs = plt.subplots(int(np.ceil(n / cols)), cols, figsize=(12, 3.2 * int(np.ceil(n / cols)))); axs = axs.ravel(); rows = []
 for k, e in enumerate(EP):
@@ -73,6 +86,57 @@ fig, ax = plt.subplots(figsize=(9, 3)); isv = (hag >= H.H_MIN) & (hag <= H.H_MAX
 ax.plot(pts["x"][~isv], pts["z"][~isv], ".", c="#c8a96e", ms=2, label="ground / sand"); ax.plot(pts["x"][isv], pts["z"][isv], ".", c="#2a7f3f", ms=2, label="vegetation (> 10 cm above DTM)")
 xs = np.linspace(x0 - 6, x0 + 6, 300); ax.plot(xs, H.sample(R[E]["dtm"], R[E]["grid_dtm"], xs, np.full_like(xs, y0)), "k-", lw=1, label="DTM")
 ax.set_xlabel("x (m)"); ax.set_ylabel("height NAP (m)"); ax.legend(markerscale=4, fontsize=7); H.save(fig, "A4_profile")'''),
+("md", "### How the classification works, step by step\nThe same 30 x 30 m window around Plant 1, after each stage. **Stage 1 (CSF):** the cloth separates ground from candidates. **Stage 2:** a candidate stays vegetation only if it is 10 cm - 1.5 m above the DTM and not planar; the others (flat or too low) go back to the ground. **Stage 3:** the final DTM is rebuilt from all ground points."),
+("code", '''def stage_window(x, y, hw=15):
+    bx = (x - hw, y - hw, x + hw, y + hw)
+    return bx, H.separate(H.read_points(E, box=bx), box=bx, debug=True)
+WIN = [stage_window(r.x, r.y) for r in top.itertuples()]                          # one window per example plant
+def classes(D):
+    c = np.zeros(len(D["x"]), int); c[D["cand"]] = 1; c[D["veg"]] = 2; return c   # 0 CSF ground, 1 rejected candidate, 2 vegetation
+GROUND, REJ, VEG = "#c8a96e", "#e07b39", "#2a7f3f"
+bx, Rw = WIN[0]; D = Rw["debug"]; cl = classes(D); xc, yc = top.x[0], top.y[0]
+sel = np.random.default_rng(0).random(len(cl)) < min(1, 120000 / len(cl))           # plot a subset, enough to see the structure
+side = sel & (abs(D["y"] - yc) < 0.3) & (abs(D["x"] - xc) < 6)
+fig, axs = plt.subplots(2, 3, figsize=(12, 7))
+panels = [("1  CSF: ground / candidates", {0: GROUND, 1: "#333333", 2: "#333333"}), ("2  after height + shape rules", {0: GROUND, 1: REJ, 2: VEG}), ("3  final vegetation", {0: "#e8e0cf", 1: "#e8e0cf", 2: VEG})]
+for k, (title, col) in enumerate(panels):
+    c = np.array([col[v] for v in range(3)])[cl]
+    axs[0, k].scatter(D["x"][sel] - xc, D["y"][sel] - yc, c=c[sel], s=.4, rasterized=True); axs[0, k].set_aspect("equal"); axs[0, k].set_title(title, fontsize=9)
+    axs[0, k].set_xlim(-15, 15); axs[0, k].set_ylim(-15, 15); axs[0, k].set_xlabel("x (m from plant)", fontsize=8)
+    axs[1, k].scatter(D["x"][side] - xc, D["z"][side], c=c[side], s=2, rasterized=True); axs[1, k].set_xlabel("x (m from plant), 0.6 m wide strip", fontsize=8)
+xs = np.linspace(xc - 6, xc + 6, 200); axs[1, 2].plot(xs - xc, H.sample(Rw["dtm"], Rw["grid_dtm"], xs, np.full_like(xs, yc)), "k-", lw=1.2, label="final DTM"); axs[1, 2].legend(fontsize=7)
+axs[1, 0].set_ylabel("height NAP (m)"); axs[0, 0].set_ylabel("y (m from plant)")
+from matplotlib.lines import Line2D
+fig.legend([Line2D([], [], marker="o", ls="", c=c) for c in (GROUND, "#333333", REJ, VEG)], ["CSF ground", "CSF candidate", "candidate rejected (flat / too low)", "vegetation"], loc="lower center", ncol=4, fontsize=8)
+fig.tight_layout(rect=(0, .04, 1, 1)); H.save(fig, "A4_csf_stages")
+cnt = pd.DataFrame([{"plant": r.patch, "points": len(classes(w[1]["debug"])), "CSF ground %": 100 * np.mean(classes(w[1]["debug"]) == 0) - 0, "CSF candidates %": 100 * np.mean(classes(w[1]["debug"]) > 0),
+                     "rejected %": 100 * np.mean(classes(w[1]["debug"]) == 1), "vegetation %": 100 * np.mean(classes(w[1]["debug"]) == 2)} for r, w in zip(top.itertuples(), WIN)])
+H.table(cnt.round(2), "A4_stage_counts")'''),
+("code", '''fig, axs = plt.subplots(1, 3, figsize=(13, 3.4))
+for ax, r, (bx_, Rw_) in zip(axs, top.itertuples(), WIN):
+    D_ = Rw_["debug"]; c_ = classes(D_); m = (abs(D_["y"] - r.y) < 0.3) & (abs(D_["x"] - r.x) < 5)
+    for v, col, lab in [(0, GROUND, "ground"), (1, REJ, "rejected candidate"), (2, VEG, "vegetation")]:
+        ax.plot(D_["x"][m & (c_ == v)] - r.x, D_["z"][m & (c_ == v)], ".", c=col, ms=2, label=lab)
+    xs = np.linspace(r.x - 5, r.x + 5, 200); ax.plot(xs - r.x, H.sample(Rw_["dtm"], Rw_["grid_dtm"], xs, np.full_like(xs, r.y)), "k-", lw=1, label="DTM")
+    ax.set_title(r.patch, fontsize=9); ax.set_xlabel("x (m from plant)", fontsize=8)
+axs[0].set_ylabel("height NAP (m)"); axs[0].legend(markerscale=4, fontsize=7); fig.tight_layout(); H.save(fig, "A4_plant_profiles")'''),
+("md", "### The ground under a plant cannot be seen\nThe DTM follows the sharp tip of narrow plants (it takes plant points that CSF called ground as terrain), so plant heights and volumes are probably too low. But from above we cannot see the sand under a plant: a real sand mound would look the same. Three DTMs for the same plants: the median DTM (used for all results), a DTM built only from the ground **around** the plant (0.5 m margin, interpolated underneath) and a DTM with narrow peaks (< 3 m) removed (morphological opening). The last two count any mound under a plant as plant, so they are **upper bounds**; on broad dune ridges (Plant 2) they clearly overshoot."),
+("code", '''opts = [("median DTM (used)", {}, "k"), ("ground from around the plant", dict(mask_plants=.5), "#d62728"), ("narrow peaks removed (3 m)", dict(open_dtm=3.), "#1f77b4")]
+fig, axs = plt.subplots(1, 3, figsize=(13, 3.4)); rows = []
+for ax, r, (bx_, Rw_) in zip(axs, top.itertuples(), WIN):
+    D_ = Rw_["debug"]; m = (abs(D_["y"] - r.y) < 0.3) & (abs(D_["x"] - r.x) < 5); ax.plot(D_["x"][m] - r.x, D_["z"][m], ".", c="#c8a96e", ms=2)
+    xs = np.linspace(r.x - 5, r.x + 5, 200)
+    for name, o, c in opts:
+        Rv = Rw_ if not o else H.separate(H.read_points(E, box=bx_), box=bx_, **o); Rv["epoch"] = E
+        ax.plot(xs - r.x, H.sample(Rv["dtm"], Rv["grid_dtm"], xs, np.full_like(xs, r.y)), "-", c=c, lw=1.3, label=name)
+        tv = H.tussocks(Rv, alpha=False); k = tv[np.hypot(tv.x - r.x, tv.y - r.y) < 1.5]
+        rows.append({"plant": r.patch, "DTM": name, "max height (m)": k.h_max.max() if len(k) else np.nan, "column volume (m3)": k.vol_column.max() if len(k) else np.nan})
+    ax.set_title(r.patch, fontsize=9); ax.set_xlabel("x (m from plant)", fontsize=8)
+axs[0].set_ylabel("height NAP (m)"); axs[0].legend(fontsize=6); fig.tight_layout(); H.save(fig, "A4_dtm_under_plants")
+H.table(pd.DataFrame(rows).round(2), "A4_dtm_under_plants")'''),
+("md", "### Is this the best CSF setting?\nSame data, other settings (made by `tools/compare_csf_variants.py`): the first CSF code with its own settings and no extra rules, and the current method with other CSF parameters or a lower-percentile DTM. Scores: error of the DTM against the field GNSS (smaller is better), vegetation points found at the three biomass samples that have plants (and none at the others), and the largest plant in window W1."),
+("code", '''f = H.TAB_DIR / "A4_csf_variants.csv"
+pd.read_csv(f) if f.exists() else print("run: python tools/compare_csf_variants.py")'''),
 ("md", "**To write (A4):** why this method given the dataset: sparse low vegetation and noise of 3 cm (so a 10 cm gate), slopes (so CSF + slope-aware gate instead of one global height threshold), 250 pts/m2 (so neighbourhood shape from a 20 cm radius). Validation: the GNSS check of the ground model (separate field data) and the biomass samples (notebook C)."),
 ]
 
@@ -112,10 +176,10 @@ for vox in [0.03, 0.05, 0.10]:
         s = H.tussocks(r, voxel=vox, alpha_radius=ar); rows.append({"voxel (m)": vox, "alpha radius (m)": ar, "vol_voxel": s.vol_voxel.sum(), "vol_alpha": s.vol_alpha.sum(), "vol_column": s.vol_column.sum()})
 H.table(pd.DataFrame(rows).round(2), "B2_sensitivity")'''),
 ("md", "**To write (B2):** column volume is the main estimate (closed base, robust to the parameters); hull over-estimates (fills space between lobes); voxel and alpha volumes change by several times with their size parameter, so they are descriptors, not unbiased volumes (see the sensitivity table)."),
-("md", "## B3 - Volume to biomass\n**AGB = volume x rho.** rho (kg dry biomass per m3 of canopy volume) is set in `helpers.py` (`RHO`): **placeholder values** until fixed from literature / the manual samples (notebook C)."),
+("md", "## B3 - Volume to biomass\n**AGB = volume x rho.** rho (kg dry biomass per m3 of canopy volume) is set in `helpers.py` (`RHO`). It comes from the manual samples (derived and checked in notebook C1): low 1.5, mid 1.64, high 3.3 kg/m3. Assumption: the measured g/m3 is dry mass per m3 of canopy volume. Change `RHO` and re-run to test other values."),
 ("code", '''show = pd.concat([t.nlargest(1, "vol_column"), t.iloc[[len(t) // 2]], t.nsmallest(1, "vol_column")]).copy(); show["patch"] = ["largest", "medium", "smallest"]
 H.table(show[["patch", "footprint_m2", "h_max", "vol_column", "agb_low_kg", "agb_mid_kg", "agb_high_kg"]].round(3), "B3_patches")'''),
-("md", "**To write (B3):** where rho comes from and its assumptions (species, dry vs fresh mass, canopy density). Are the differences between the patches logical (bigger plant = more biomass; similar plants = similar kg per m2)?"),
+("md", "**To write (B3):** where rho comes from (3 manual samples, see C1) and its assumptions (species, dry vs fresh mass, canopy density, how the sampled volume was defined). Are the differences between the patches logical (bigger plant = more biomass; similar plants = similar kg per m2)?"),
 ("md", "## B4 - Uncertainty\nTwo blocks: **structure** (how tussocks are found / measured: DBSCAN distance, minimum points, minimum height) and **conversion** (rho). Every combination is run."),
 ("code", '''import itertools
 rows = []
@@ -130,7 +194,17 @@ H.table(unc.reset_index(), "B4_uncertainty_budget")'''),
 for ax, p in zip(axs, ["eps", "min_samples", "min_height"]):
     sw.groupby(p).volume_m3.agg(["min", "median", "max"]).plot(ax=ax, marker="o"); ax.set_title("effect of " + p)
 axs[0].set_ylabel("total volume (m3)"); H.save(fig, "B4_parameter_effects")'''),
-("md", "**To write (B4):** which block dominates (compare the relative spread of the two rows) and what that means. Also name density / noise (structure) and species, moisture and dry vs fresh mass (conversion)."),
+("md", "### Ground model as an extra source of structural uncertainty\nEvery height comes from the DTM, so how it is built changes the volume. Same epoch, three versions: the method of the report, a lower CSF threshold, and a DTM from the 25th percentile of the ground heights per cell (this sits lower under plants, where the median can be pulled up by plant points that CSF called ground). The last two rows build the ground from outside the plants (see A4): they cannot be validated and count sand mounds under plants as plant, so read them as **upper bounds**, not as estimates."),
+("code", '''q25 = lambda v: np.percentile(v, 25)
+rows = []
+for name, opt in [("report method (median DTM)", {}), ("CSF threshold 0.05", dict(csf=dict(threshold=.05))), ("CSF cloth 0.75 m", dict(csf=dict(resolution=.75))), ("CSF cloth 1.0 m", dict(csf=dict(resolution=1.0))), ("DTM = 25th percentile", dict(dtm_how=q25)),
+                  ("ground from around plants (0.5 m) - upper bound", dict(mask_plants=.5)), ("narrow DTM peaks removed (3 m) - upper bound", dict(open_dtm=3.))]:
+    Rv = r if not opt else H.separate(H.read_points(E), **opt); Rv["epoch"] = E
+    tv = H.tussocks(Rv, alpha=False)
+    rows.append({"ground model": name, "cover (m2)": round(H.cover_m2(Rv), 1), "tussocks": len(tv), "volume (m3)": round(tv.vol_column.sum(), 1), "biomass mid rho (kg)": round(tv.agb_mid_kg.sum(), 1)})
+g = pd.DataFrame(rows); g["volume vs report (%)"] = (100 * (g["volume (m3)"] / g["volume (m3)"].iloc[0] - 1)).round(0)
+H.table(g, "B4_ground_model_sensitivity")'''),
+("md", "**To write (B4):** which block dominates (also compare the ground-model table: the way the DTM is built can change the volume by tens of percent) (compare the relative spread of the two rows) and what that means. Also name density / noise (structure) and species, moisture and dry vs fresh mass (conversion)."),
 ]
 
 # ============================================================================ C
@@ -161,8 +235,19 @@ H.table(pd.DataFrame(rows), "C1_biomass_samples")'''),
 ("code", '''meas = S.measured_g_per_m3 / 1000                                   # kg per m3, same unit as rho
 print("Measured density (kg/m3): min %.3f | 25 %% %.3f | median %.3f | 75 %% %.3f | max %.3f" % (meas.min(), meas.quantile(.25), meas.median(), meas.quantile(.75), meas.max()))
 print("Placeholder rho (kg/m3):", H.RHO)'''),
-("md", "**To write (C1a):** the measured values are biomass per m3 - the same quantity as rho - so they test the conversion directly: where do low / mid / high rho sit in the measured distribution? Set rho from the measured quartiles (25 % / median / 75 %) if the sampled volume is the canopy volume (ask Sander how the volume was defined). Only a few samples: this is a plausibility check, not a calibration or machine learning."),
-("md", "### (b) Noise floor of ground change and (c) agreement of the volume methods"),
+("code", '''smp = pd.read_csv(H.ROOT / "tables" / "C1_biomass_samples.csv"); seen = smp[smp["veg points within 1 m"] >= 10]     # samples where LiDAR also sees vegetation
+rho_s = seen["measured (g/m3)"] / 1000
+print(f"{len(seen)} of {len(smp)} samples are on vegetation that the LiDAR sees; their density (kg/m3): {sorted(rho_s.round(2))}")
+print(f"-> min {rho_s.min():.2f} | median {rho_s.median():.2f} | max {rho_s.max():.2f}   (rho used in helpers.py: {H.RHO})")
+H.table(pd.DataFrame({"rho low (kg/m3)": [H.RHO["low"]], "rho mid": [H.RHO["mid"]], "rho high": [H.RHO["high"]],
+                      "samples min": [rho_s.min()], "samples median": [rho_s.median()], "samples max": [rho_s.max()]}).round(2), "C1_rho_check")'''),
+("md", "**To write (C1a):** the measured values are biomass per m3 - the same quantity as rho - so they test the conversion directly. The 4 samples with no LiDAR vegetation nearby (17-93 g/m3) are almost empty plots and say nothing about canopy density, so rho is taken from the 3 samples on vegetation (min = low, median = mid). The densest sample (8.6 kg/m3) has a tiny LiDAR volume (LiDAR misses thin leaves), so `high` is set at about twice the median instead. Assumption: the sampled volume is the canopy volume (ask Sander). Only 3 usable samples: a plausibility check and a rough rho, not a calibration, and they cannot also serve as an independent validation (that would be circular)."),
+("md", "### (b) Ground model against field GNSS\nGNSS track points (walked on sand) minus the DTM of the same epoch (Oct 2026; the tracks lie just outside the main study area, so a small separate LiDAR file around them is used, see `data/gnss_area`). GNSS heights are ellipsoidal, so the offset to NAP is the median difference; the RMSE is what remains. Only points where the LiDAR has data are used."),
+("code", '''d, off, gt, n_all = H.gnss_dtm_check()
+print(f"{len(d)} of {n_all} GNSS track points near the tracks have LiDAR data; ellipsoid -> NAP offset = {off:.2f} m (median)")
+H.table(gt.round(3), "C1_gnss_dtm_rmse")'''),
+("md", "**To write (C1b):** the RMSE is the vertical error of the ground model (and therefore the smallest vegetation height we can trust). It is smallest on the flat track and larger on slopes, where a horizontal GNSS error of a few cm turns into a vertical error. The offset is estimated, not taken from the official geoid, so this tests the shape and precision of the DTM, not its absolute height. The GNSS plant outlines mostly lie in LiDAR gaps, so detection itself could not be checked with GNSS."),
+("md", "### (c) Noise floor of ground change and (d) agreement of the volume methods"),
 ("code", '''rows = []
 for a, b in zip(EP[:-1], EP[1:]):
     d, lod = H.ground_change(R[a], R[b]); rows.append({"from": H.EPOCH_LABEL[a], "to": H.EPOCH_LABEL[b], "median change (m)": round(lod["median"], 3), "sigma (m)": round(lod["sigma"], 3), "LoD 95% (m)": round(lod["lod95"], 3)})
@@ -229,7 +314,7 @@ for e in EP:
                                                               "partial, elevation held fixed": round(partial(q.slope_deg, q.agb_mid_kg, q.z_nap), 2)})
 H.table(pd.DataFrame(rows), "RQ_slope_correlations")'''),
 ("md", "**To write (RQ):** direction and strength of the slope - biomass relation, whether it survives with elevation held fixed (partial correlation), and confounding: biomass depends on elevation / distance to the sea, burial and wind exposure as well as slope; vegetation detection can also be biased on steep slopes."),
-("md", "## C4 - Discussion\nHow the vegetation and biomass patterns may influence dune development at the Zandmotor, and whether your data are sufficient or only indicative (number of epochs, one small area, placeholder or few-sample rho).\n\n## C5 - Reflection\nHow this LiDAR workflow compares with satellite imagery and manual sampling; recommendations to improve the estimates and the quality assessment (more biomass samples, species map, repeat GNSS on bare sand, density-matched acquisitions)."),
+("md", "## C4 - Discussion\nHow the vegetation and biomass patterns may influence dune development at the Zandmotor, and whether your data are sufficient or only indicative (number of epochs, one small area, a rho based on only 3 samples).\n\n## C5 - Reflection\nHow this LiDAR workflow compares with satellite imagery and manual sampling; recommendations to improve the estimates and the quality assessment (more biomass samples, species map, repeat GNSS on bare sand, density-matched acquisitions)."),
 ]
 
 make("A_explore_vegetation.ipynb", A)

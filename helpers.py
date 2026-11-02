@@ -33,7 +33,11 @@ EPOCH_LABEL = {"20230927": "Sep 2023", "20240227": "Feb 2024", "20240501": "May 
 DENSITY = 250.0          # every epoch is thinned to this many points / m2, so epochs are comparable
 H_MIN, H_MAX = 0.10, 1.5  # vegetation = between 10 cm (sand noise is ~3 cm) and 1.5 m above the ground
 EPS, MIN_SAMPLES = 0.20, 8  # DBSCAN: points closer than 20 cm belong to the same tussock
-RHO = dict(low=0.3, mid=0.8, high=1.4)   # kg dry biomass per m3 of canopy volume. PLACEHOLDER - replace / tune!
+# rho = kg dry biomass per m3 of canopy volume. Taken from the manual samples that the LiDAR also sees as vegetation
+# (>= 10 vegetation points within 1 m, see notebook C1): 1.50 / 1.64 / 8.65 kg/m3 -> low = lowest, mid = median.
+# "high" is NOT the single densest sample (8.65, LiDAR volume only 0.03 m3, so unreliable) but about twice the median.
+# Assumption: Sander's g/m3 is dry mass per m3 of canopy volume. Only 3 usable samples -> treat as a plausible range, not a calibration.
+RHO = dict(low=1.5, mid=1.64, high=3.3)
 BLOCK_M = 5.0            # block size for maps (m)
 DTM_RES, FINE_RES = 0.25, 0.10   # raster cell sizes (m)
 
@@ -126,7 +130,7 @@ def slope_deg(dtm, res):
     return np.degrees(np.arctan(np.hypot(gx, gy))).astype(np.float32)
 
 
-def csf_ground(xyz, resolution=0.5, rigidness=2, threshold=0.10):
+def csf_ground(xyz, resolution=0.5, rigidness=2, threshold=0.10, **_):
     """Cloth Simulation Filter: returns the indices of ground points and of non-ground candidates."""
     import CSF
     c = CSF.CSF()
@@ -169,40 +173,73 @@ def local_shape(xyz, idx, radius=0.20, k=48, min_neighbours=8, chunk=50_000):
     return out, sparse
 
 
-def separate(p):
+def separate(p, box=None, csf=None, dtm_how="median", gate=None, sparse_veg=True, drop_outliers=True, debug=False, mask_plants=0.0, open_dtm=0.0):
     """THE METHOD (A4/B1). Input: points p (x, y, z, rgb). Steps:
     1 remove low outliers  2 CSF -> ground + candidates  3 DTM from the ground  4 candidates are vegetation if they are
-    10 cm - 1.5 m above the DTM (a bit more on slopes) and not flat (eigenvalue shape)  5 final DTM + rasters."""
-    keep = ~low_outliers(np.column_stack([p["x"], p["y"], p["z"]]))
+    10 cm - 1.5 m above the DTM (a bit more on slopes) and not flat (eigenvalue shape)  5 final DTM + rasters.
+    The options only exist to compare variants (defaults = the method of the report): csf = dict(resolution, rigidness, threshold),
+    dtm_how = "median" or a function per cell, gate = (h_min, h_max), sparse_veg = candidates with too few neighbours count
+    as vegetation, drop_outliers = remove low outliers first, mask_plants = build the final DTM only from ground points more
+    than this distance (m) away from detected vegetation and interpolate underneath (0 = off), open_dtm = width (m) of a
+    morphological opening of the DTM: removes DTM peaks narrower than this (plants taken as ground) but keeps wide dune ridges (0 = off)."""
+    keep = ~low_outliers(np.column_stack([p["x"], p["y"], p["z"]])) if drop_outliers else np.ones(len(p["x"]), bool)
+    hmin0, hmax0 = gate or (H_MIN, H_MAX)
     x, y, z, rgb = p["x"][keep], p["y"][keep], p["z"][keep], p["rgb"][keep]
     xyz = np.column_stack([x, y, z])
-    gd, gf = make_grid(DTM_RES), make_grid(FINE_RES)
-    ground, cand = csf_ground(xyz)
-    dtm = fill_holes(cell_stat(gd, x[ground], y[ground], z[ground]))
+    gd, gf = make_grid(DTM_RES, box), make_grid(FINE_RES, box)
+    ground, cand = csf_ground(xyz, **(csf or {}))
+    ground_csf = ground                                                    # kept for the stage figures (debug)
+    dtm = fill_holes(cell_stat(gd, x[ground], y[ground], z[ground], dtm_how))
     hag = z - sample(dtm, gd, x, y)
     slope = slope_deg(dtm, DTM_RES)
-    h_min = lambda i: H_MIN + 0.5 * DTM_RES * np.tan(np.radians(sample(slope, gd, x[i], y[i])))   # slope-aware gate
+    h_min = lambda i: hmin0 + 0.5 * DTM_RES * np.tan(np.radians(sample(slope, gd, x[i], y[i])))   # slope-aware gate
     shape, sparse = local_shape(xyz, cand)
     flat = (shape["planarity"] >= 0.65) | ((shape["linearity"] <= 0.30) & (shape["sphericity"] <= 0.15))
-    is_veg = (hag[cand] >= h_min(cand)) & (hag[cand] <= H_MAX) & (sparse | ~flat)
+    is_veg = (hag[cand] >= h_min(cand)) & (hag[cand] <= hmax0) & ((sparse & sparse_veg) | (~sparse & ~flat))
     ground = np.concatenate([ground, cand[~is_veg]])                       # candidates that are not vegetation are ground too
-    dtm = fill_holes(cell_stat(gd, x[ground], y[ground], z[ground]))      # final, cleaner DTM
+    if mask_plants:                                  # ground under a plant = interpolated from the ground around it
+        vi, vok = cell_of(gd, x[cand[is_veg]], y[cand[is_veg]])
+        zone = np.zeros(gd["nr"] * gd["nc"], bool); zone[vi[vok]] = True
+        zone = ndi.binary_dilation(zone.reshape(gd["nr"], gd["nc"]), iterations=max(1, int(round(mask_plants / DTM_RES)))).ravel()
+        gi, gok = cell_of(gd, x[ground], y[ground]); outside = ground[gok & ~zone[np.clip(gi, 0, zone.size - 1)]]
+        dtm = fill_holes(cell_stat(gd, x[outside], y[outside], z[outside], dtm_how))
+        slope = slope_deg(dtm, DTM_RES); hag = z - sample(dtm, gd, x, y)
+        is_veg = (hag[cand] >= h_min(cand)) & (hag[cand] <= hmax0) & ((sparse & sparse_veg) | (~sparse & ~flat))
+    else:
+        dtm = fill_holes(cell_stat(gd, x[ground], y[ground], z[ground], dtm_how))      # final, cleaner DTM
+    if open_dtm:                                     # narrow needles in the DTM are plants, wide ridges are dune
+        k = max(3, int(round(open_dtm / DTM_RES)))
+        dtm = np.minimum(dtm, ndi.grey_opening(dtm, size=(k, k))).astype(np.float32)
+        slope = slope_deg(dtm, DTM_RES); hag = z - sample(dtm, gd, x, y)
+        is_veg = (hag[cand] >= h_min(cand)) & (hag[cand] <= hmax0) & ((sparse & sparse_veg) | (~sparse & ~flat))
     slope = slope_deg(dtm, DTM_RES)
     hag = z - sample(dtm, gd, x, y)
     veg = cand[is_veg]
-    veg = veg[(hag[veg] >= h_min(veg)) & (hag[veg] <= H_MAX)]            # same gates on the final DTM
+    veg = veg[(hag[veg] >= h_min(veg)) & (hag[veg] <= hmax0)]            # same gates on the final DTM
     bright, exg = rgb.mean(1), 2 * rgb[:, 1] - rgb[:, 0] - rgb[:, 2]
+    den = rgb[:, 1] + rgb[:, 0] - rgb[:, 2]                                   # VARI = (G - R) / (G + R - B)
+    vari = np.clip(np.divide(rgb[:, 1] - rgb[:, 0], den, out=np.zeros(len(x)), where=np.abs(den) > 1e-6), -1, 1)
     shape_v, _ = local_shape(xyz, veg)
     isveg = np.zeros(len(x), bool); isveg[veg] = True
     idx, ok = cell_of(gf, x, y)
     n = gf["nr"] * gf["nc"]
-    return {"grid_dtm": gd, "grid_fine": gf, "dtm": dtm, "slope": slope,
+    out = {"grid_dtm": gd, "grid_fine": gf, "dtm": dtm, "slope": slope,
             "chm": cell_stat(gf, x, y, np.maximum(hag, 0), "max"),
             "npts": np.bincount(idx[ok], minlength=n).reshape(gf["nr"], gf["nc"]),
             "veg_count": np.bincount(idx[ok & isveg], minlength=n).reshape(gf["nr"], gf["nc"]),
             "veg": {"x": x[veg], "y": y[veg], "z": z[veg], "hag": hag[veg], "rgb": rgb[veg], "brightness": bright[veg],
-                    "exg": exg[veg], **shape_v},
+                    "exg": exg[veg], "vari": vari[veg], "slope": sample(slope, gd, x[veg], y[veg]), **shape_v},
             "n_points": len(x), "n_veg": len(veg)}
+    if debug:      # every point with its class after each stage (for the A4 figures)
+        out["debug"] = {"x": x, "y": y, "z": z, "rgb": rgb, "ground_csf": ground_csf, "cand": cand, "veg": veg}
+    return out
+
+
+def colour_stats(rgb):
+    """Median brightness, ExG and VARI of a set of points (rgb 0-1, one row per point)."""
+    rgb = np.asarray(rgb, float); den = rgb[:, 1] + rgb[:, 0] - rgb[:, 2]
+    vari = np.where(np.abs(den) > 1e-6, (rgb[:, 1] - rgb[:, 0]) / np.where(np.abs(den) > 1e-6, den, 1), np.nan)
+    return {"brightness": np.nanmedian(rgb.mean(1)), "exg": np.nanmedian(2 * rgb[:, 1] - rgb[:, 0] - rgb[:, 2]), "vari": np.nanmedian(np.clip(vari, -1, 1))}
 
 
 def process(epoch, force=False):
@@ -302,9 +339,10 @@ def tussocks(R, eps=EPS, min_samples=MIN_SAMPLES, min_height=H_MIN, voxel=0.05, 
             continue          # too low (noise), too tall (pole / person) or too thin (stake) to be a tussock
         ev = np.sort(np.linalg.eigvalsh(np.cov(xyh.T)))[::-1]
         cx, cy = xyh[:, 0].mean(), xyh[:, 1].mean()
-        rows.append({"epoch": R["epoch"], "x": cx, "y": cy, "n_pts": len(i), "footprint_m2": foot, "h_max": h.max(),
+        rows.append({"epoch": R["epoch"], "x": cx, "y": cy, "n_pts": len(i), "footprint_m2": foot, "h_max": h.max(), "h_mean": h.mean(),
                      "h_p95": np.percentile(h, 95), "linearity": (ev[0] - ev[1]) / ev[0], "planarity": (ev[1] - ev[2]) / ev[0],
                      "sphericity": ev[2] / ev[0], "brightness": v["brightness"][i].mean(), "exg": v["exg"][i].mean(),
+                     "vari": np.median(v["vari"][i]), "slope_mean": v["slope"][i].mean(), "slope_median": np.median(v["slope"][i]),
                      "slope_deg": float(sample(R["slope"], R["grid_dtm"], np.array([cx]), np.array([cy]))[0]),
                      "vol_column": vol_column(xyh), "vol_hull": vol_hull(xyh), "vol_voxel": vol_voxel(xyh, voxel),
                      "vol_alpha": vol_alpha(xyh, alpha_radius) if alpha else np.nan})
@@ -312,6 +350,40 @@ def tussocks(R, eps=EPS, min_samples=MIN_SAMPLES, min_height=H_MIN, voxel=0.05, 
     for k in ("low", "mid", "high"):
         t[f"agb_{k}_kg"] = t["vol_column"] * rho[k] if len(t) else []     # BIOMASS = VOLUME x RHO
     return t
+
+
+# =============================================================================== 4b. GNSS CHECK OF THE GROUND MODEL
+GPKG = ROOT / "data" / "Project_1.gpkg"
+GNSS_BOX = (72518.0, 451957.0, 72590.0, 452015.0)                  # the GNSS tracks + 15 m (they lie outside the main study area)
+GNSS_LAZ = ROOT / "data" / "gnss_area" / "20261007_gnss_area.laz"  # LiDAR of the GNSS epoch (Oct 2026) around the tracks
+
+
+def gnss_dtm_check(**opt):
+    """Validate the ground model: GNSS points walked on the sand (tracks) minus the DTM made from the LiDAR of the same epoch.
+    GNSS heights are ellipsoidal, so the offset to NAP is the median difference; the RMSE is what is left after removing it.
+    Only points where the LiDAR really has data are used (elsewhere the DTM is only interpolated)."""
+    import geopandas as gpd
+    from pyproj import Transformer
+    las = laspy.read(GNSS_LAZ)
+    x, y = np.asarray(las.x), np.asarray(las.y)
+    rgb = np.column_stack([las.red, las.green, las.blue]).astype(np.float32) / 65535.0
+    R = separate({"x": x, "y": y, "z": np.asarray(las.z), "rgb": rgb}, box=GNSS_BOX, **opt)
+    g = gpd.read_file(GPKG, layer="TrackPoints")
+    gx, gy = Transformer.from_crs(4326, 28992, always_xy=True).transform(g.geometry.x.values, g.geometry.y.values)
+    df = pd.DataFrame({"track": g["name"].values, "x": gx, "y": gy, "z_gnss": g["elevation"].values})
+    gd, gf = R["grid_dtm"], R["grid_fine"]
+    df = df[(df.x > gd["x0"]) & (df.x < gd["x0"] + gd["nc"] * gd["res"]) & (df.y < gd["y1"]) & (df.y > gd["y1"] - gd["nr"] * gd["res"])].copy()
+    r = np.clip(((gf["y1"] - df.y.values) / gf["res"]).astype(int), 0, gf["nr"] - 1)
+    c = np.clip(((df.x.values - gf["x0"]) / gf["res"]).astype(int), 0, gf["nc"] - 1)
+    df["has_data"] = has_data(R)[r, c]
+    df["dtm"] = sample(R["dtm"], gd, df.x.values, df.y.values)
+    df["slope_deg"] = sample(R["slope"], gd, df.x.values, df.y.values)
+    d = df[df.has_data & np.isfinite(df.dtm)].copy()
+    offset = float(np.median(d.z_gnss - d.dtm))
+    d["error_m"] = d.z_gnss - d.dtm - offset
+    rows = [{"track": k, "points": len(q), "mean slope (deg)": q.slope_deg.mean(), "mean error (m)": q.error_m.mean(),
+             "RMSE (m)": np.sqrt((q.error_m ** 2).mean())} for k, q in list(d.groupby("track")) + [("all tracks", d)]]
+    return d, offset, pd.DataFrame(rows), len(df)
 
 
 # =============================================================================== 5. MAPS, CHANGE THROUGH TIME
