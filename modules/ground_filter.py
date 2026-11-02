@@ -1,169 +1,217 @@
-"""
-MODULE: ground_filter.py
-PURPOSE: Two-stage bare dune ground separation and terrain classification.
-ASSIGNMENT QUESTION: A4 (Ground Filtering Methodology)
-"""
+import os
+import itertools
+import copy
 
-from pathlib import Path
-import numpy as np
 import laspy
-from scipy.spatial import cKDTree
+import numpy as np
+import pandas as pd
 import CSF
 
-def csf(
-    coords: np.ndarray,
-    resolution: float = 0.6,
-    rigidness: int = 2,
-    threshold: float = 0.12,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Inverts the point cloud and drapes a virtual cloth to separate broad dune topography
-    from above-ground candidate vegetation.
-    """
-    csf = CSF.CSF()
-    csf.params.bSloopSmooth = True
-    csf.params.cloth_resolution = resolution
-    csf.params.rigidness = rigidness
-    csf.params.class_threshold = threshold
-    csf.params.time_step = 0.65
-    csf.params.interations = 500
+# input dataset
 
-    csf.setPointCloud(coords.tolist())
-    ground_indices = CSF.VecInt()
-    non_ground_indices = CSF.VecInt()
-    csf.do_filtering(ground_indices, non_ground_indices, False)
+datasets = {
+    "bare_sand": [
+        "dataset_ground_filtering/bare_sand1.laz",
+        "dataset_ground_filtering/bare_sand2.las"],
+    "sparse_vegetation": [
+        "dataset_ground_filtering/sparse_vegetation1.las",
+        "dataset_ground_filtering/sparse_vegetation2.las"],
+    "dense_vegetation": [
+        "dataset_ground_filtering/dense_vegetation1.las",
+        "dataset_ground_filtering/dense_vegetation2.las"]}
 
-    return np.array(ground_indices, dtype=np.int64), np.array(non_ground_indices, dtype=np.int64)
+output_folder = "dataset_ground_filtering/out/CSF_sensitivity_analysis"
 
+os.makedirs(output_folder, exist_ok=True)
 
-def eigenvalues(
-    coords: np.ndarray,
-    candidate_idx: np.ndarray,
-    radius: float = 0.20,
-    min_neighbors: int = 8,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Extracts 3D covariance eigenvalues (lambda_1 >= lambda_2 >= lambda_3) within a search radius
-    to derive structural descriptors: Planarity, Linearity, and Sphericity.
-    """
-    kdtree = cKDTree(coords)
-    candidate_pts = coords[candidate_idx]
-    n_candidates = len(candidate_pts)
+# csf parameters
 
-    planarity = np.zeros(n_candidates, dtype=np.float32)
-    linearity = np.zeros(n_candidates, dtype=np.float32)
-    sphericity = np.zeros(n_candidates, dtype=np.float32)
+cloth_resolutions = [0.5, 1.0, 2.0]
+thresholds = [0.25, 0.5]
+rigidness_values = [1, 2]
 
-    for i, pt in enumerate(candidate_pts):
-        neighbor_indices = kdtree.query_ball_point(pt, r=radius)
-        if len(neighbor_indices) >= min_neighbors:
-            neighbors = coords[neighbor_indices]
-            cov = np.cov(neighbors, rowvar=False)
+iterations = 500
+time_step = 0.65
+slope_smoothing = False
 
-            eigenvalues = np.linalg.eigvalsh(cov)
-            eigenvalues = np.sort(np.maximum(eigenvalues, 1e-9))[::-1]
-            l1, l2, l3 = eigenvalues[0], eigenvalues[1], eigenvalues[2]
+parameter_combinations = list(
+    itertools.product(
+        cloth_resolutions,
+        thresholds,
+        rigidness_values))
 
-            planarity[i] = (l2 - l3) / l1
-            linearity[i] = (l1 - l2) / l1
-            sphericity[i] = l3 / l1
+# Jaccard similarity function
 
-    return planarity, linearity, sphericity
+def jaccard_similarity(class_a, class_b):
+
+    intersection = np.sum(class_a & class_b)
+    union = np.sum(class_a | class_b)
+
+    if union == 0: # avoid 0 division error
+        return 1.0
+
+    return intersection / union
 
 
-def classify_ground_and_vegetation(
-    input_laz_path: str,
-    output_laz_path: str | None = None,
-    planarity_threshold: float = 0.65,
-    linearity_threshold: float = 0.30,
-    sphericity_threshold: float = 0.15,
-) -> dict:
-    """Executes the two-stage classification workflow and exports a single diagnostic
+# Start analysis
 
-    .laz containing ASPRS classifications and CloudCompare scalar fields.
-    """
-    las = laspy.read(input_laz_path)
-    coords = np.vstack((las.x, las.y, las.z)).transpose()
-    total_points = len(coords)
+all_results = []
+all_sensitivity_results = []
 
-    # Stage 1: Macro-ground filtering (CSF)
-    ground_idx, candidate_veg_idx = csf(coords)
+for dataset_name, filepaths in datasets.items():
 
-    # Stage 2: Micro-refinement via geometric eigenvalues
-    planarity, linearity, sphericity = eigenvalues(
-        coords, candidate_veg_idx
-    )
+    print(f"\nPROCESSING DATASET: {dataset_name}")
 
-    # Sand residual decision rule
-    is_true_veg = (planarity < planarity_threshold) & (
-        (linearity > linearity_threshold) | (sphericity > sphericity_threshold)
-    )
-    final_veg_idx = candidate_veg_idx[is_true_veg]
-    residual_sand_idx = candidate_veg_idx[~is_true_veg]
-    final_ground_idx = np.concatenate((ground_idx, residual_sand_idx))
+    for filepath in filepaths:
+        las = laspy.read(filepath)
+        xyz = np.column_stack((las.x, las.y, las.z)).astype(np.float64)
+        total_points = len(xyz)
 
-    # Calculate statistics
-    veg_ratio = (
-        (len(final_veg_idx) / total_points) * 100.0 if total_points > 0 else 0.0
-    )
+        if total_points == 0:
+            print("Empty point cloud. Skipping.")
+            continue
 
-    # Save output LAZ with extra diagnostic scalar fields
-    if output_laz_path is not None:
-        Path(output_laz_path).parent.mkdir(parents=True, exist_ok=True)
+        file_stem = os.path.splitext(os.path.basename(filepath))[0]
 
-        # Create header using las.header.version (fixes AttributeError)
-        header = laspy.LasHeader(
-            point_format=las.point_format, version=las.header.version
-        )
-        header.offsets = las.header.offsets
-        header.scales = las.header.scales
 
-        # Add diagnostic scalar fields for CloudCompare inspection
-        header.add_extra_dim(
-            laspy.ExtraBytesParams(name="stage_csf", type=np.uint8)
-        )
-        header.add_extra_dim(
-            laspy.ExtraBytesParams(name="stage_refined", type=np.uint8)
-        )
-        header.add_extra_dim(
-            laspy.ExtraBytesParams(name="planarity", type=np.float32)
-        )
+        ground_masks = []
+        combination_records = []
 
-        out_las = laspy.LasData(header)
-        out_las.x = las.x
-        out_las.y = las.y
-        out_las.z = las.z
+        # run all parameter combinations
 
-        # Preserve RGB if present
-        if hasattr(las, "red"):
-            out_las.red = las.red
-            out_las.green = las.green
-            out_las.blue = las.blue
+        for combination_id, (resolution, threshold, rigidness) in enumerate(parameter_combinations):
+            csf = CSF.CSF()
+            csf.params.cloth_resolution = resolution
+            csf.params.class_threshold = threshold
+            csf.params.rigidness = rigidness
+            csf.params.time_step = time_step
+            csf.params.interations = iterations
+            csf.params.bSloopSmooth = slope_smoothing
+            csf.setPointCloud(xyz)
+            ground = CSF.VecInt()
+            non_ground = CSF.VecInt()
+            csf.do_filtering(ground, non_ground)
+            ground_idx = np.fromiter(ground, dtype=np.int64)
+            non_ground_idx = np.fromiter(non_ground, dtype=np.int64)
 
-        # ASPRS Standard Classification: 2 = Ground, 4 = Medium/Low Vegetation
-        out_las.classification[:] = 0
-        out_las.classification[final_ground_idx] = 2
-        out_las.classification[final_veg_idx] = 4
+            # Check classification indices
 
-        # Populate scalar fields
-        stage1 = np.zeros(total_points, dtype=np.uint8)
-        stage1[candidate_veg_idx] = 1
-        out_las.stage_csf = stage1
+            if (np.any(ground_idx < 0)
+                or np.any(ground_idx >= total_points)
+                or np.any(non_ground_idx < 0)
+                or np.any(non_ground_idx >= total_points)):
+                raise ValueError("CSF returned invalid point indices.")
 
-        stage2 = np.zeros(total_points, dtype=np.uint8)
-        stage2[final_veg_idx] = 1
-        out_las.stage_refined = stage2
+            if np.intersect1d(ground_idx, non_ground_idx).size > 0:
+                raise ValueError("Ground and non-ground indices overlap.")
 
-        full_planarity = np.zeros(total_points, dtype=np.float32)
-        full_planarity[candidate_veg_idx] = planarity
-        out_las.planarity = full_planarity
+            if len(ground_idx) + len(non_ground_idx) != total_points:
+                raise ValueError("Some points were not classified.")
 
-        out_las.write(output_laz_path)
+            # Create Boolean ground mask
 
-    return {
-        "coords": coords,
-        "ground_idx": final_ground_idx,
-        "veg_idx": final_veg_idx,
-        "veg_percentage": veg_ratio,
-        "total_points": total_points,
-        "las": las,
-    }
+            ground_mask = np.zeros(total_points, dtype=bool)
+            ground_mask[ground_idx] = True
+            ground_masks.append(ground_mask)
+
+            ground_percentage = (len(ground_idx) / total_points * 100)
+
+            combination_records.append({
+                "dataset": dataset_name,
+                "input_file": file_stem,
+                "combination_id": combination_id,
+                "resolution": resolution,
+                "threshold": threshold,
+                "rigidness": rigidness,
+                "ground_points": len(ground_idx),
+                "non_ground_points": len(non_ground_idx),
+                "ground_percentage": ground_percentage})
+
+        # Convert classifications to NumPy matrix
+
+        ground_masks = np.asarray(ground_masks)
+        number_combinations = len(ground_masks)
+
+        # pairwise classification similarity
+
+        similarity_matrix = np.zeros((number_combinations, number_combinations))
+
+        for i in range(number_combinations):
+            for j in range(number_combinations):
+                similarity_matrix[i, j] = jaccard_similarity(
+                    ground_masks[i],
+                    ground_masks[j]
+                )
+
+        # Mean similarity of each combination against all other combinations
+
+        mean_similarity = (
+            similarity_matrix.sum(axis=1) - 1
+        ) / (number_combinations - 1)
+
+        for i in range(number_combinations):
+            record = combination_records[i].copy()
+            record["mean_jaccard_similarity"] = mean_similarity[i]
+            all_results.append(record)
+
+        # Parameter sensitivity analysis
+
+        parameter_definitions = {
+            "cloth_resolution": cloth_resolutions,
+            "threshold": thresholds,
+            "rigidness": rigidness_values}
+
+        parameter_columns = {
+            "cloth_resolution": 0,
+            "threshold": 1,
+            "rigidness": 2}
+
+        for parameter_name, parameter_values in parameter_definitions.items():
+
+            parameter_position = parameter_columns[parameter_name]
+
+            other_positions = [
+                p for p in range(3)
+                if p != parameter_position]
+
+            isolated_similarities = []
+
+            # Compare combinations where ONLY the selected parameter changes.
+
+            for other_values in itertools.product(
+                *[parameter_definitions[name]
+                for name in parameter_definitions
+                if parameter_columns[name] in other_positions]):
+
+                matching_indices = []
+
+                for i, combination in enumerate(parameter_combinations):
+                    if all(
+                        combination[pos] == value
+                        for pos, value in zip(other_positions, other_values)):
+                        matching_indices.append(i)
+
+                # Compare every pair of values for the selected parameter
+
+                for i, j in itertools.combinations(matching_indices, 2):
+                    similarity = jaccard_similarity(
+                        ground_masks[i],
+                        ground_masks[j])
+                    isolated_similarities.append(similarity)
+
+            mean_agreement = np.mean(isolated_similarities)
+            sensitivity = 1 - mean_agreement
+
+            all_sensitivity_results.append({
+                "dataset": dataset_name,
+                "input_file": file_stem,
+                "parameter": parameter_name,
+                "mean_jaccard_agreement": mean_agreement,
+                "sensitivity_score": sensitivity})
+
+
+# Export result of analysis to csv
+pd.DataFrame(all_results).to_csv(os.path.join(output_folder,"combination_similarity.csv"),index=False)
+pd.DataFrame(all_sensitivity_results).to_csv(os.path.join(output_folder,"parameter_sensitivity.csv"),index=False)
+
+print(f"Results saved in: {output_folder}")
