@@ -1,0 +1,6 @@
+track,points,mean slope (deg),mean error (m),RMSE (m)
+Bushk 1,39,8.953,-0.099,0.176
+Track 1,34,13.254,-0.126,0.279
+Track 2,42,12.254,0.018,0.093
+Track 3,23,2.385,-0.019,0.062
+all tracks,138,9.922,-0.057,0.177

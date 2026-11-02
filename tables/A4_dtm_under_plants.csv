@@ -1,0 +1,10 @@
+plant,DTM,max height (m),column volume (m3)
+Plant 1 (largest),median DTM (used),0.89,0.91
+Plant 1 (largest),ground from around the plant,1.05,1.73
+Plant 1 (largest),narrow peaks removed (3 m),0.99,1.66
+Plant 2 (most elongated),median DTM (used),0.73,0.9
+Plant 2 (most elongated),ground from around the plant,1.31,4.53
+Plant 2 (most elongated),narrow peaks removed (3 m),1.3,4.39
+Plant 3 (most compact),median DTM (used),0.65,0.22
+Plant 3 (most compact),ground from around the plant,1.16,0.71
+Plant 3 (most compact),narrow peaks removed (3 m),1.13,0.66

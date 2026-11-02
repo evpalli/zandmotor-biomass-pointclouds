@@ -1,0 +1,8 @@
+ground model,cover (m2),tussocks,volume (m3),biomass mid rho (kg),volume vs report (%)
+report method (median DTM),433.4,687,78.1,128.0,0.0
+CSF threshold 0.05,461.5,751,83.7,137.2,7.0
+CSF cloth 0.75 m,492.6,782,93.8,153.8,20.0
+CSF cloth 1.0 m,539.6,860,106.2,174.1,36.0
+DTM = 25th percentile,603.6,925,117.2,192.3,50.0
+ground from around plants (0.5 m) - upper bound,1132.9,1114,391.6,642.3,401.0
+narrow DTM peaks removed (3 m) - upper bound,1306.7,1173,463.1,759.5,493.0
