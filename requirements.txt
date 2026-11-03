@@ -5,6 +5,8 @@ matplotlib
 scikit-learn
 laspy[lazrs]
 cloth-simulation-filter
+geopandas
+pyproj
 jupyterlab
 nbformat
 nbclient

@@ -173,15 +173,18 @@ def local_shape(xyz, idx, radius=0.20, k=48, min_neighbours=8, chunk=50_000):
     return out, sparse
 
 
-def separate(p, box=None, csf=None, dtm_how="median", gate=None, sparse_veg=True, drop_outliers=True, debug=False, mask_plants=0.0, open_dtm=0.0):
+def separate(p, box=None, csf=None, dtm_how="median", gate=None, sparse_veg=True, drop_outliers=True, debug=False, mask_plants=0.0, open_dtm=0.0, ground_back="low"):
     """THE METHOD (A4/B1). Input: points p (x, y, z, rgb). Steps:
     1 remove low outliers  2 CSF -> ground + candidates  3 DTM from the ground  4 candidates are vegetation if they are
-    10 cm - 1.5 m above the DTM (a bit more on slopes) and not flat (eigenvalue shape)  5 final DTM + rasters.
+    10 cm - 1.5 m above the DTM (a bit more on slopes) and not flat (eigenvalue shape)  5 final DTM from the ground + the candidates
+    that were only too low (not the flat ones above the ground), then rasters.
     The options only exist to compare variants (defaults = the method of the report): csf = dict(resolution, rigidness, threshold),
     dtm_how = "median" or a function per cell, gate = (h_min, h_max), sparse_veg = candidates with too few neighbours count
     as vegetation, drop_outliers = remove low outliers first, mask_plants = build the final DTM only from ground points more
     than this distance (m) away from detected vegetation and interpolate underneath (0 = off), open_dtm = width (m) of a
-    morphological opening of the DTM: removes DTM peaks narrower than this (plants taken as ground) but keeps wide dune ridges (0 = off)."""
+    morphological opening of the DTM: removes DTM peaks narrower than this (plants taken as ground) but keeps wide dune ridges (0 = off),
+    ground_back = which rejected candidates go back to the ground for the final DTM: "low" (default: only the ones that are too low;
+    flat candidates clearly above the ground are canopy surface, not sand) or "all" (also the flat ones; this lifted the DTM into plant cores)."""
     keep = ~low_outliers(np.column_stack([p["x"], p["y"], p["z"]])) if drop_outliers else np.ones(len(p["x"]), bool)
     hmin0, hmax0 = gate or (H_MIN, H_MAX)
     x, y, z, rgb = p["x"][keep], p["y"][keep], p["z"][keep], p["rgb"][keep]
@@ -196,7 +199,10 @@ def separate(p, box=None, csf=None, dtm_how="median", gate=None, sparse_veg=True
     shape, sparse = local_shape(xyz, cand)
     flat = (shape["planarity"] >= 0.65) | ((shape["linearity"] <= 0.30) & (shape["sphericity"] <= 0.15))
     is_veg = (hag[cand] >= h_min(cand)) & (hag[cand] <= hmax0) & ((sparse & sparse_veg) | (~sparse & ~flat))
-    ground = np.concatenate([ground, cand[~is_veg]])                       # candidates that are not vegetation are ground too
+    rej = cand[~is_veg]
+    if ground_back == "low":                                               # flat but clearly above the ground = plant mat, not sand
+        rej = rej[hag[rej] < h_min(rej)]
+    ground = np.concatenate([ground, rej])                                 # candidates that are not vegetation are ground too
     if mask_plants:                                  # ground under a plant = interpolated from the ground around it
         vi, vok = cell_of(gd, x[cand[is_veg]], y[cand[is_veg]])
         zone = np.zeros(gd["nr"] * gd["nc"], bool); zone[vi[vok]] = True
@@ -342,7 +348,6 @@ def tussocks(R, eps=EPS, min_samples=MIN_SAMPLES, min_height=H_MIN, voxel=0.05, 
         rows.append({"epoch": R["epoch"], "x": cx, "y": cy, "n_pts": len(i), "footprint_m2": foot, "h_max": h.max(), "h_mean": h.mean(),
                      "h_p95": np.percentile(h, 95), "linearity": (ev[0] - ev[1]) / ev[0], "planarity": (ev[1] - ev[2]) / ev[0],
                      "sphericity": ev[2] / ev[0], "brightness": v["brightness"][i].mean(), "exg": v["exg"][i].mean(),
-                     "vari": np.median(v["vari"][i]), "slope_mean": v["slope"][i].mean(), "slope_median": np.median(v["slope"][i]),
                      "slope_deg": float(sample(R["slope"], R["grid_dtm"], np.array([cx]), np.array([cy]))[0]),
                      "vol_column": vol_column(xyh), "vol_hull": vol_hull(xyh), "vol_voxel": vol_voxel(xyh, voxel),
                      "vol_alpha": vol_alpha(xyh, alpha_radius) if alpha else np.nan})
@@ -352,38 +357,9 @@ def tussocks(R, eps=EPS, min_samples=MIN_SAMPLES, min_height=H_MIN, voxel=0.05, 
     return t
 
 
-# =============================================================================== 4b. GNSS CHECK OF THE GROUND MODEL
+# =============================================================================== 4b. FIELD GNSS POINTS (used in notebook C)
 GPKG = ROOT / "data" / "Project_1.gpkg"
-GNSS_BOX = (72518.0, 451957.0, 72590.0, 452015.0)                  # the GNSS tracks + 15 m (they lie outside the main study area)
-GNSS_LAZ = ROOT / "data" / "gnss_area" / "20261007_gnss_area.laz"  # LiDAR of the GNSS epoch (Oct 2026) around the tracks
 
-
-def gnss_dtm_check(**opt):
-    """Validate the ground model: GNSS points walked on the sand (tracks) minus the DTM made from the LiDAR of the same epoch.
-    GNSS heights are ellipsoidal, so the offset to NAP is the median difference; the RMSE is what is left after removing it.
-    Only points where the LiDAR really has data are used (elsewhere the DTM is only interpolated)."""
-    import geopandas as gpd
-    from pyproj import Transformer
-    las = laspy.read(GNSS_LAZ)
-    x, y = np.asarray(las.x), np.asarray(las.y)
-    rgb = np.column_stack([las.red, las.green, las.blue]).astype(np.float32) / 65535.0
-    R = separate({"x": x, "y": y, "z": np.asarray(las.z), "rgb": rgb}, box=GNSS_BOX, **opt)
-    g = gpd.read_file(GPKG, layer="TrackPoints")
-    gx, gy = Transformer.from_crs(4326, 28992, always_xy=True).transform(g.geometry.x.values, g.geometry.y.values)
-    df = pd.DataFrame({"track": g["name"].values, "x": gx, "y": gy, "z_gnss": g["elevation"].values})
-    gd, gf = R["grid_dtm"], R["grid_fine"]
-    df = df[(df.x > gd["x0"]) & (df.x < gd["x0"] + gd["nc"] * gd["res"]) & (df.y < gd["y1"]) & (df.y > gd["y1"] - gd["nr"] * gd["res"])].copy()
-    r = np.clip(((gf["y1"] - df.y.values) / gf["res"]).astype(int), 0, gf["nr"] - 1)
-    c = np.clip(((df.x.values - gf["x0"]) / gf["res"]).astype(int), 0, gf["nc"] - 1)
-    df["has_data"] = has_data(R)[r, c]
-    df["dtm"] = sample(R["dtm"], gd, df.x.values, df.y.values)
-    df["slope_deg"] = sample(R["slope"], gd, df.x.values, df.y.values)
-    d = df[df.has_data & np.isfinite(df.dtm)].copy()
-    offset = float(np.median(d.z_gnss - d.dtm))
-    d["error_m"] = d.z_gnss - d.dtm - offset
-    rows = [{"track": k, "points": len(q), "mean slope (deg)": q.slope_deg.mean(), "mean error (m)": q.error_m.mean(),
-             "RMSE (m)": np.sqrt((q.error_m ** 2).mean())} for k, q in list(d.groupby("track")) + [("all tracks", d)]]
-    return d, offset, pd.DataFrame(rows), len(df)
 
 
 # =============================================================================== 5. MAPS, CHANGE THROUGH TIME
@@ -399,7 +375,7 @@ def block_reduce(a, n, how="mean"):
 
 
 def blocks(R, t=None, n_m=BLOCK_M):
-    """Cover, tussock volume / biomass, slope, height and data coverage per 5 m block (for maps and the research question)."""
+    """Cover, tussock volume / biomass, slope, height and data coverage per 5 m block (for maps and time series)."""
     t = tussocks(R, alpha=False) if t is None else t
     gd, gf = R["grid_dtm"], R["grid_fine"]
     nf, nd = int(round(n_m / gf["res"])), int(round(n_m / gd["res"]))

@@ -9,7 +9,8 @@ import helpers as H
 q25 = lambda v: np.percentile(v, 25)
 VARIANTS = {
     "report method (CSF res .5, threshold .10, rigidness 2)": {},
-    "first CSF code (res .6, threshold .12, no height / shape gates)": dict(csf=dict(resolution=.6, rigidness=2, threshold=.12), gate=(-9, 99), sparse_veg=False, drop_outliers=False),
+    "previous rule: all rejected candidates go back to the ground": dict(ground_back="all"),
+    "first CSF code (res .6, threshold .12, no height / shape gates)": dict(csf=dict(resolution=.6, rigidness=2, threshold=.12), gate=(-9, 99), sparse_veg=False, drop_outliers=False, ground_back="all"),
     "report rules + CSF res .6, threshold .12": dict(csf=dict(resolution=.6, rigidness=2, threshold=.12)),
     "CSF rigidness 1": dict(csf=dict(resolution=.5, rigidness=1, threshold=.10)),
     "CSF rigidness 3": dict(csf=dict(resolution=.5, rigidness=3, threshold=.10)),
@@ -29,9 +30,7 @@ for name, opt in VARIANTS.items():
     R1 = H.separate(P1, box=W1, **opt); R1["epoch"] = "x"; t1 = H.tussocks(R1, alpha=False)
     R2 = H.separate(P2, box=W2, **opt); R2["epoch"] = "x"; v2 = R2["veg"]
     near = [int((np.hypot(v2["x"] - s.x, v2["y"] - s.y) < 1).sum()) for _, s in S[(S.x > W2[0]) & (S.x < W2[2]) & (S.y > W2[1]) & (S.y < W2[3])].iterrows()]
-    g = H.gnss_dtm_check(**opt)[2].set_index("track")["RMSE (m)"] * 100
-    rows.append({"variant": name, "GNSS RMSE all (cm)": g["all tracks"], "GNSS RMSE flat Track 3 (cm)": g["Track 3"], "GNSS RMSE steep Track 1 (cm)": g["Track 1"],
-                 "W1 vegetation points": R1["n_veg"], "W1 points < 10 cm above ground (%)": 100 * float(np.mean(R1["veg"]["hag"] < 0.10)),
+    rows.append({"variant": name, "W1 vegetation points": R1["n_veg"], "W1 points < 10 cm above ground (%)": 100 * float(np.mean(R1["veg"]["hag"] < 0.10)),
                  "W1 cover (m2)": H.cover_m2(R1), "W1 tussock volume (m3)": t1.vol_column.sum(), "W1 largest plant volume (m3)": t1.vol_column.max(),
                  "W2 veg points within 1 m of the 4 samples": str(near)})
     print(rows[-1]["variant"], flush=True)

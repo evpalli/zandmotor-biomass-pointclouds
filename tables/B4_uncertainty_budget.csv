@@ -1,3 +1,3 @@
 index,low,base,high
-structure: volume (m3) over all parameter sets,23.29,78.07,96.56
-conversion: biomass (kg) for rho low / mid / high,117.11,128.04,257.63
+structure: volume (m3) over all parameter sets,77.06,140.37,156.14
+conversion: biomass (kg) for rho low / mid / high,210.55,230.2,463.21

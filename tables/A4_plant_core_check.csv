@@ -1,8 +1,8 @@
 group,points,median intensity,median brightness,multi-return %
-Plant 1: vegetation (final),415,8925,0.46,0.2
-Plant 1: CSF 'ground' in the plant core (> 15 cm above the surrounding ground),386,6757,0.44,0.0
-Plant 1: ground 3+ m from the plant,81964,10200,0.44,0.0
-Plant 3: vegetation (final),124,11730,0.4,0.0
-Plant 3: CSF 'ground' in the plant core (> 15 cm above the surrounding ground),186,12240,0.34,0.0
-Plant 3: ground 3+ m from the plant,90453,13770,0.46,0.0
-bare sand plain (all points),100216,13770,0.52,0.0
+Plant 1: vegetation (final),695,7905,0.47,0.0
+Plant 1: CSF 'ground' in the plant core (> 15 cm above the surrounding ground),186,7140,0.44,0.0
+Plant 1: ground 3+ m from the plant,81463,10200,0.44,0.0
+Plant 3: vegetation (final),197,10965,0.45,0.0
+Plant 3: CSF 'ground' in the plant core (> 15 cm above the surrounding ground),158,12240,0.34,0.0
+Plant 3: ground 3+ m from the plant,90826,13770,0.46,0.0
+bare sand plain (all points),100219,13770,0.52,0.0
