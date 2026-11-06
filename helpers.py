@@ -15,7 +15,7 @@ import pandas as pd
 from scipy import ndimage as ndi
 from scipy.interpolate import griddata
 from scipy.spatial import ConvexHull, Delaunay, QhullError, cKDTree
-
+import math
 # =============================================================================== 1. SETTINGS (edit here)
 ROOT = Path(__file__).resolve().parent
 CLIPS_DIR = ROOT / "data" / "clips"        # put your .laz clips here (any sub-folders)
@@ -32,7 +32,7 @@ EPOCH_LABEL = {"20230927": "Sep 2023", "20240227": "Feb 2024", "20240501": "May 
                "20261007": "Oct 2026"}
 DENSITY = 250.0          # every epoch is thinned to this many points / m2, so epochs are comparable
 H_MIN, H_MAX = 0.10, 1.5  # vegetation = between 10 cm (sand noise is ~3 cm) and 1.5 m above the ground
-EPS, MIN_SAMPLES = 0.20, 8  # DBSCAN: points closer than 20 cm belong to the same tussock
+EPS, MIN_SAMPLES = 1.1, 8  # DBSCAN: points closer than 20 cm belong to the same tussock
 # rho = kg dry biomass per m3 of canopy volume. Taken from the manual samples that the LiDAR also sees as vegetation
 # (>= 10 vegetation points within 1 m, see notebook C1): 1.50 / 1.64 / 8.65 kg/m3 -> low = lowest, mid = median.
 # "high" is NOT the single densest sample (8.65, LiDAR volume only 0.03 m3, so unreliable) but about twice the median.
@@ -355,6 +355,47 @@ def tussocks(R, eps=EPS, min_samples=MIN_SAMPLES, min_height=H_MIN, voxel=0.05, 
     for k in ("low", "mid", "high"):
         t[f"agb_{k}_kg"] = t["vol_column"] * rho[k] if len(t) else []     # BIOMASS = VOLUME x RHO
     return t
+
+# =============================================================================== 4a. BIOMASS FROM VOLUME (literature)
+VOLUME_METHODS = {"vol_column": vol_column, "vol_hull": vol_hull, "vol_voxel": vol_voxel, "vol_alpha": vol_alpha}
+
+# Manual samples: measured biomass + the LiDAR volume of each sample for every volume method
+datas_validation = {
+    (72489.188, 451498.822): {"validation_values_biomass": 563.29,
+                              "vol_column": 0.03167198, "vol_hull": 0.02315689,
+                              "vol_voxel": 0.004, "vol_alpha": 0.002734439},
+    (72314.095, 451555.211): {"validation_values_biomass": 1502.5,
+                              "vol_column": 0.03857443, "vol_hull": 0.328850303,
+                              "vol_voxel": 0.004875, "vol_alpha": 0.002938094},}
+
+
+def apply_biomass_estimation2_to_df(df, volume_col="vol_column", method="walker_zinnert"):
+    """
+    Applies biomass_estimation2 across rows of a tussock DataFrame.
+    """
+    lows, mids, highs = [], [], []
+    
+    for idx, row in df.iterrows():
+        # Get the precomputed volume from the DataFrame row
+        vol = row[volume_col]
+        
+        # Call your function (passing volume directly since xyh isn't stored in the summary df)
+        if method == "walker_zinnert":
+            rs = [10.3 - 3.2, 10.3, 10.3 + 3.2]
+            range_biomass = [(r / vol) / 1000 for r in rs] # kg/m3
+        else:
+            raise ValueError(f"unknown method: {method}")
+        lows.append(range_biomass[0])
+        mids.append(range_biomass[1])
+        highs.append(range_biomass[2])
+        
+    # Add them as new columns to a copy of the DataFrame
+    result_df = df.copy()
+    result_df["agb_low_kg_est"] = lows
+    result_df["agb_mid_kg_est"] = mids
+    result_df["agb_high_kg_est"] = highs
+    
+    return result_df
 
 
 # =============================================================================== 4b. FIELD GNSS POINTS (used in notebook C)
