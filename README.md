@@ -5,6 +5,7 @@ No `modules/` folder.
 
 ```
 helpers.py                     ALL functions + the settings you may change (top of the file)
+biomass_estimation_AMSM5230C   Project report in pdf
 prepare_data.py                STEP 1: merge the .laz clips -> one file per epoch
 find_and_clip.py               (before step 1) cut a small area out of the big strip files
 notebooks/A_explore_vegetation.ipynb          A1-A4
@@ -13,6 +14,8 @@ notebooks/C_validation_and_change.ipynb       C1-C5 + research question
 data/clips/                    your clipped .laz files (any sub-folders; the file name must contain the date)
 data/biomass_measurements.csv  the 7 manual biomass samples (Sander Vos)
 figures/  tables/              made by the notebooks (PNG / CSV for the report)
+CSF_parameter_tune/dataset_ground_filtering   stores .laz files of dataset for parameter tuning
+CSF_parameter_tune/ground_filter.py           parameter tuning for CSF script
 ```
 
 ## Results
